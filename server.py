@@ -53,12 +53,48 @@ MAX_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_IMAGES_PER_REQUEST = 40
 THUMBNAIL_WIDTH = 520
 
-# False for local dev and the desktop build; the public Docker deployment sets
-# this explicitly (see DEPLOY.md) so the interface can tell visitors their
+# False for local dev and the desktop build; a public deployment (see
+# DEPLOY.md) sets this explicitly so the interface can tell visitors their
 # upload is leaving their machine, which is only true in that one context.
 PUBLIC_DEPLOYMENT = os.environ.get("PUBLIC_DEPLOYMENT", "").strip() == "1"
 
+# Set when the frontend is hosted separately from this API (e.g. a static
+# site on Vercel calling a Render-hosted backend) -- same-origin deployments,
+# including local dev and the desktop build, never need this. A comma
+# separated list of exact origins, e.g. "https://my-app.vercel.app". Vercel's
+# per-deploy preview URLs are matched by the regex below instead, since they
+# change on every push and can't be listed individually up front.
+_ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGIN", "").split(",") if o.strip()]
+
 app = FastAPI(title="UTR / Payment Detail Extractor", docs_url="/api/docs")
+
+if _ALLOWED_ORIGINS:
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_ALLOWED_ORIGINS,
+        allow_origin_regex=r"https://.*\.vercel\.app",
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+    )
+
+
+def _client_ip(request: Request) -> str:
+    """
+    The visitor's real address, not the reverse proxy's.
+
+    Render (like every PaaS that terminates TLS at its own edge) sits in
+    front of the app, so request.client.host is the platform's internal
+    proxy address for every single visitor -- keying the rate limit on that
+    would silently turn a per-IP cap into one shared budget for the entire
+    site. X-Forwarded-For's first hop is the actual client; only trust it
+    when a deployment mode that implies a proxy is actually in front of us.
+    """
+    if PUBLIC_DEPLOYMENT:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 # A locally-run copy has exactly one trusted user, so this never mattered
@@ -78,7 +114,7 @@ _rate_buckets: dict[str, list[float]] = defaultdict(list)
 @app.middleware("http")
 async def _rate_limit(request: Request, call_next):
     if request.method == "POST" and request.url.path.startswith(_RATE_LIMITED_PREFIXES):
-        client = request.client.host if request.client else "unknown"
+        client = _client_ip(request)
         now = time.monotonic()
         cutoff = now - _RATE_LIMIT_WINDOW_S
         with _rate_lock:
