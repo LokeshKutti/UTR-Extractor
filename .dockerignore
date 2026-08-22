@@ -1,0 +1,20 @@
+# Secrets -- must never end up baked into an image layer. The public
+# deployment gets its config from real environment variables set on the host,
+# not from this file.
+.env
+*.key
+
+.venv/
+__pycache__/
+*.pyc
+
+# PyInstaller desktop build -- unrelated to the container image.
+build/
+dist/
+*.spec
+
+.git/
+.vscode/
+samples/
+Documentation.pdf
+README.md

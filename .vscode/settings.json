@@ -1,0 +1,12 @@
+{
+  // Use the project's own virtual environment, not a system Python.
+  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+  "python.terminal.activateEnvironment": true,
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.venv": true
+  },
+  "[python]": {
+    "editor.rulers": [88]
+  }
+}

@@ -1,0 +1,39 @@
+{
+  // Press F5 to run. Needs the "Python" extension (ms-python.python).
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run UTR Extractor",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/server.py",
+      "args": ["--port", "8000"],
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      // Opens your browser as soon as uvicorn reports it is listening.
+      "serverReadyAction": {
+        "pattern": "Uvicorn running on (https?://[0-9a-zA-Z.]+:[0-9]+)",
+        "uriFormat": "%s",
+        "action": "openExternally"
+      }
+    },
+    {
+      "name": "Run self test",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/core.py",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Run accuracy benchmark",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/bench.py",
+      "args": ["--compare", "--count", "4",
+               "--degradations", "clean,small,jpeg,lowcontrast,small+jpeg"],
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}

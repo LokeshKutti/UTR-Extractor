@@ -1,0 +1,1385 @@
+"""
+Blood test report extraction
+============================
+A separate module from the payment side. Both share the OCR layer in core.py
+and nothing else -- a lab report is a different shape of document, so it gets
+its own rules, its own result type and its own exports.
+
+    python medical.py     run the end-to-end self test
+
+Why it is not just more FieldRules
+----------------------------------
+A payment receipt is label-and-value: "UTR No: 3128...". A lab report is a
+*table*: every row is `name, result, unit, reference range`, and the ranges are
+printed on the page. So the parser here works row-wise and, crucially, prefers
+the reference range the lab printed over any built-in one -- ranges vary by
+laboratory, method, age and sex, and the report's own range is the only one
+that is definitely right for that sample.
+
+Scope
+-----
+This extracts and transcribes. A value is flagged only by comparing it against
+the range printed beside it, which is arithmetic, not interpretation. Nothing
+here diagnoses anything or suggests what to do about a result.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import json
+import re
+import sys
+from collections import Counter
+from dataclasses import dataclass, field
+from datetime import datetime
+from html import escape
+from pathlib import Path
+from typing import Sequence
+
+import core
+from core import FieldRule, Line, Match, OcrResult, _clean_plain
+
+REPORT_TITLE = "Blood Test Report Extract"
+
+DISCLAIMER = (
+    "Transcribed from the uploaded report. A value is marked high or low only "
+    "by comparing it with the reference range printed on that same report -- "
+    "this is not a medical opinion. Check anything that matters against the "
+    "original document and with the doctor who ordered the test."
+)
+
+
+# =========================================================================== #
+#  1. REPORT METADATA
+# =========================================================================== #
+
+def _clean_name(value: str) -> str:
+    """
+    Tidy a patient name read off a crowded header line.
+
+    Labs pack several fields onto one row -- "NAME : MRS.SUBBU LAKSHMI Age:60
+    Yr/F" -- so the value pattern happily runs on into the next label. Cutting
+    at the first following label word keeps the name to itself.
+    """
+    text = _clean_plain(value)
+    text = re.split(r"\s+(?=(?:Age|Sex|Gender|Ref|Reg|Lab|Date|UHID|Bill|"
+                    r"Sample|Patient|Report)\b)", text, maxsplit=1,
+                    flags=re.IGNORECASE)[0]
+    return text.strip(" :.-,")
+
+
+META_RULES: list[FieldRule] = [
+    FieldRule(
+        key="patient_name", label="Patient Name",
+        # No bare "patient" or "name": the label regex lets an optional "id"
+        # follow an alias, so "patient" happily matches the box "Patient ID" and
+        # then walks off to grab whatever text sits further along that row.
+        # "name" last: aliases are tried longest-first, and it is anchored to the
+        # start of a box, so the "TEST NAME" column header cannot match it.
+        aliases=["patient name", "patients name", "patient's name",
+                 "name of patient", "name"],
+        value_pattern=r"(?:M/?R?S?\.?\s*)?[A-Za-z][A-Za-z.\s]{2,50}",
+        # Not strict: several labs print "Patient Name  MR. X" inside one box,
+        # and a strict label would refuse to look at the rest of that box. The
+        # aliases are long and distinctive enough to be safe unanchored.
+        strict_label=False, multi_segment_value=True, normalise=_clean_name,
+    ),
+    FieldRule(
+        key="patient_id", label="Patient / UHID",
+        aliases=["patient id", "uhid", "mrn", "reg no", "registration no",
+                 "lab id", "lab no", "sample id", "accession no", "barcode"],
+        value_pattern=r"[A-Za-z0-9][A-Za-z0-9\-/]{3,24}",
+        normalise=lambda v: re.sub(r"\s", "", v).upper(), multi=True,
+    ),
+    FieldRule(
+        key="age_sex", label="Age / Sex",
+        aliases=["age/sex", "age / sex", "age & sex", "age", "sex", "gender"],
+        value_pattern=r"\d{1,3}\s*(?:y(?:rs?|ears?)?)?\s*[/,]?\s*(?:M|F|Male|Female)?",
+        normalise=_clean_plain,
+    ),
+    FieldRule(
+        key="referred_by", label="Referred By",
+        aliases=["referred by", "ref. doctor", "ref doctor", "ref.by dr",
+                 "ref by dr", "ref. by", "ref by", "referring doctor",
+                 "consultant", "doctor"],
+        value_pattern=r"[A-Za-z][A-Za-z.\s]{2,50}",
+        strict_label=False, multi_segment_value=True, normalise=_clean_plain,
+    ),
+    FieldRule(
+        key="lab_name", label="Laboratory",
+        aliases=["laboratory", "lab name", "diagnostics", "pathology"],
+        value_pattern=r"[A-Za-z][A-Za-z0-9.,&\s]{3,60}",
+        normalise=_clean_plain,
+    ),
+    FieldRule(
+        key="collected_on", label="Sample Collected",
+        aliases=["collected on", "collection date", "sample collected",
+                 "sample date", "drawn on"],
+        value_pattern=core.DATE_PATTERN, normalise=_clean_plain,
+    ),
+    FieldRule(
+        key="reported_on", label="Reported On",
+        aliases=["reported on", "report date", "rpt date", "reporting date",
+                 "released on", "date of report"],
+        value_pattern=core.DATE_PATTERN, normalise=_clean_plain,
+    ),
+    FieldRule(
+        key="sample_type", label="Sample Type",
+        aliases=["sample type", "specimen", "sample"],
+        value_pattern=r"[A-Za-z][A-Za-z\s]{2,30}", normalise=_clean_plain,
+    ),
+]
+
+META_ORDER = [r.key for r in META_RULES]
+
+
+# =========================================================================== #
+#  2. ANALYTES
+# =========================================================================== #
+
+@dataclass
+class Analyte:
+    """One measurable quantity and the fallback range for an adult."""
+    key: str
+    name: str
+    aliases: Sequence[str]
+    unit: str = ""
+    low: float | None = None
+    high: float | None = None
+    panel: str = "Other"
+    note: str = ""
+    # Female range, where it genuinely differs. Used only when the report prints
+    # no range of its own AND the patient's sex was read off the header.
+    low_f: float | None = None
+    high_f: float | None = None
+
+    def range_for(self, sex: str | None) -> tuple[float | None, float | None]:
+        if sex == "F" and (self.low_f is not None or self.high_f is not None):
+            return self.low_f, self.high_f
+        return self.low, self.high
+
+
+def detect_sex(meta: dict[str, str]) -> str | None:
+    """
+    Read the patient's sex out of whatever the header printed.
+
+    Handles "42 Y / F", "61 / MALE", "60 Yr/F", "Male". Returns None when it is
+    absent or ambiguous -- guessing here would produce a confident verdict
+    against the wrong range, which is worse than declining to judge.
+    """
+    blob = " ".join(v for k, v in meta.items()
+                    if k in ("age_sex", "patient_name") and v)
+    if not blob:
+        return None
+    if re.search(r"\bfemale\b|\bF\b|/\s*F\b", blob, re.IGNORECASE):
+        if not re.search(r"\bmale\b", blob, re.IGNORECASE):
+            return "F"
+    if re.search(r"\bmale\b|\bM\b|/\s*M\b", blob, re.IGNORECASE):
+        return "M"
+    return None
+
+
+# Fallback ranges only -- typical adult values, used when the report does not
+# print its own. Several genuinely differ by sex or method, which is exactly why
+# the printed range always wins.
+ANALYTES: list[Analyte] = [
+    # ---- Complete blood count -------------------------------------------- #
+    Analyte("haemoglobin", "Haemoglobin",
+            ["haemoglobin", "hemoglobin", "hb", "hgb"], "g/dL", 13.0, 17.0,
+            "Complete Blood Count", "range differs by sex",
+            low_f=12.0, high_f=15.0),
+    Analyte("rbc", "RBC Count", ["rbc count", "rbc", "red blood cell",
+            "total rbc"], "million/µL", 4.5, 5.5, "Complete Blood Count",
+            "range differs by sex", low_f=3.8, high_f=4.8),
+    Analyte("wbc", "WBC / Total Leucocyte Count",
+            ["total leucocyte count", "total leukocyte count", "wbc count",
+             "tlc", "wbc", "leucocyte count"], "/µL", 4000, 11000,
+            "Complete Blood Count"),
+    Analyte("platelet", "Platelet Count",
+            ["platelet count", "platelets", "plt"], "/µL", 150000, 450000,
+            "Complete Blood Count"),
+    Analyte("hct", "Haematocrit / PCV",
+            ["haematocrit", "hematocrit", "pcv", "packed cell volume", "hct"],
+            "%", 40.0, 50.0, "Complete Blood Count", "range differs by sex",
+            low_f=36.0, high_f=46.0),
+    Analyte("mcv", "MCV", ["mcv", "mean corpuscular volume"], "fL", 83.0, 101.0,
+            "Complete Blood Count"),
+    Analyte("mch", "MCH", ["mch", "mean corpuscular haemoglobin"], "pg", 27.0, 32.0,
+            "Complete Blood Count"),
+    Analyte("mchc", "MCHC", ["mchc"], "g/dL", 31.5, 34.5, "Complete Blood Count"),
+    Analyte("rdw", "RDW", ["rdw", "rdw-cv"], "%", 11.6, 14.0, "Complete Blood Count"),
+    Analyte("neutrophils", "Neutrophils", ["neutrophils", "neutrophil"], "%",
+            40.0, 80.0, "Differential Count"),
+    Analyte("lymphocytes", "Lymphocytes", ["lymphocytes", "lymphocyte"], "%",
+            20.0, 40.0, "Differential Count"),
+    Analyte("eosinophils", "Eosinophils", ["eosinophils", "eosinophil"], "%",
+            1.0, 6.0, "Differential Count"),
+    Analyte("monocytes", "Monocytes", ["monocytes", "monocyte"], "%",
+            2.0, 10.0, "Differential Count"),
+    Analyte("basophils", "Basophils", ["basophils", "basophil"], "%",
+            0.0, 2.0, "Differential Count"),
+    Analyte("esr", "ESR", ["esr", "erythrocyte sedimentation rate"], "mm/hr",
+            0.0, 20.0, "Complete Blood Count"),
+
+    # ---- Diabetes --------------------------------------------------------- #
+    # The alias lists carry every spelling seen on real reports, including the
+    # labs' own misspellings ("cholestrol", "triglericids"). A typo that is
+    # printed on thousands of reports is not worth being pedantic about.
+    Analyte("glucose_f", "Glucose (Fasting)",
+            ["blood sugar (fasting)", "blood sugar(fasting)", "fasting blood sugar",
+             "blood sugar fasting", "glucose fasting", "fasting glucose",
+             "bl.sugar (f)", "bl.sugar(f)", "bl sugar (f)", "b.sugar (f)",
+             "sugar (f)", "fbs", "sugar fasting"], "mg/dL",
+            70.0, 100.0, "Diabetes"),
+    Analyte("glucose_pp", "Glucose (Post Prandial)",
+            ["post prandial blood sugar", "blood sugar (p.p)", "blood sugar(p.p)",
+             "blood sugar (pp)", "blood sugar(pp)", "glucose post prandial",
+             "bl.sugar (pp)", "bl.sugar(pp)", "bl sugar (pp)", "b.sugar(pp)",
+             "sugar (pp)", "pp glucose", "ppbs", "blood sugar pp",
+             "post prandial"], "mg/dL", 70.0, 140.0, "Diabetes"),
+    Analyte("glucose_r", "Glucose (Random)",
+            ["random blood sugar", "blood sugar (random)", "glucose random",
+             "rbs"], "mg/dL", 70.0, 140.0, "Diabetes"),
+    Analyte("hba1c", "HbA1c",
+            ["hba1c (biorad)", "hba1c(biorad)", "hba1c (bio-rad)", "hba1c",
+             "hb a1c", "hba1 c", "glycated haemoglobin",
+             "glycosylated haemoglobin"], "%", 4.0, 5.6, "Diabetes"),
+    # Derived from HbA1c, printed under many names. No built-in range: labs
+    # publish it against their own bands, so a value with no printed range is
+    # reported without a verdict rather than judged against a guess.
+    Analyte("eag", "Estimated Average Glucose",
+            ["estimated average glucose", "estimated glucose level",
+             "mean blood glucose", "average blood glucose",
+             "estimated avg glucose", "eag", "eab", "abg"],
+            "mg/dL", None, None, "Diabetes"),
+
+    # ---- Lipids ----------------------------------------------------------- #
+    Analyte("chol_total", "Total Cholesterol",
+            ["serum cholesterol", "serum cholestrol", "total cholesterol",
+             "total cholestrol", "cholesterol total", "cholesterol",
+             "cholestrol"], "mg/dL", None, 200.0, "Lipid Profile"),
+    Analyte("hdl", "HDL Cholesterol",
+            ["serum hdl cholesterol", "serum hdl", "hdl cholesterol", "hdl"],
+            "mg/dL", 40.0, None, "Lipid Profile", "range differs by sex",
+            low_f=50.0),
+    Analyte("ldl", "LDL Cholesterol",
+            ["serum ldl cholesterol", "serum ldl", "ldl cholesterol", "ldl"],
+            "mg/dL", None, 100.0, "Lipid Profile"),
+    Analyte("vldl", "VLDL Cholesterol",
+            ["serum vldl cholesterol", "serum vldl", "vldl cholesterol", "vldl"],
+            "mg/dL", None, 30.0, "Lipid Profile"),
+    Analyte("triglycerides", "Triglycerides",
+            ["serum triglycerides", "serum triglericids", "serum triglycerids",
+             "triglycerides", "triglycerids", "triglericids", "triglyceride",
+             "tg"], "mg/dL", None, 150.0, "Lipid Profile"),
+    # A distinct entry rather than leaving this to fall through to Total
+    # Cholesterol: "Total Cholesterol/HDL" is a ratio, unitless, with its own
+    # row on the report. Without this the row's alias ("total cholesterol")
+    # matched as a PREFIX of "total cholesterol/hdl" -- "/" was accepted as a
+    # word boundary the same as a space -- so the ratio silently overwrote the
+    # real cholesterol reading under one shared key. Confirmed on a real report.
+    Analyte("chol_hdl_ratio", "Total Cholesterol / HDL Ratio",
+            ["total cholesterol/hdl", "total cholesterol / hdl",
+             "cholesterol/hdl ratio", "tc/hdl ratio", "chol/hdl ratio",
+             "coronary risk ratio-1", "coronary risk ratio -1",
+             "coronary risk ratio - 1", "coronary risk ratio 1",
+             "coronary risk ratio-i"],
+            "", None, None, "Lipid Profile"),
+    # Same family as chol_hdl_ratio above but a different formula (LDL/HDL, not
+    # T.Chol/HDL) -- printed under its own row on reports that show both.
+    # Previously absent entirely, so its alias "hdl" matched inside the row and
+    # silently overwrote the real HDL Cholesterol reading. Confirmed on a real
+    # report.
+    Analyte("ldl_hdl_ratio", "LDL / HDL Ratio",
+            ["ldl/hdl ratio", "ldl / hdl ratio", "ldl/hdl",
+             "coronary risk ratio-ii", "coronary risk ratio -ii",
+             "coronary risk ratio - ii", "coronary risk ratio ii",
+             "coronary risk ratio-2", "coronary risk ratio -2",
+             "coronary risk ratio - 2", "coronary risk ratio 2"],
+            "", None, None, "Lipid Profile"),
+    # Total Cholesterol minus HDL -- a distinct printed row, not a stand-in for
+    # Total Cholesterol. Previously absent, so its alias "cholesterol" matched
+    # inside "Non HDL Cholesterol" and overwrote the real Total Cholesterol
+    # reading. Confirmed on a real report. 130 mg/dL is the commonly printed
+    # desirable ceiling, used only when a report gives no range of its own.
+    Analyte("non_hdl_chol", "Non-HDL Cholesterol",
+            ["non hdl cholesterol", "non-hdl cholesterol", "non hdl cholestrol",
+             "non-hdl cholestrol"],
+            "mg/dL", None, 130.0, "Lipid Profile"),
+
+    # ---- Liver ------------------------------------------------------------ #
+    Analyte("bilirubin_t", "Bilirubin (Total)",
+            ["total bilirubin", "bilirubin total", "bilirubin"], "mg/dL",
+            0.3, 1.2, "Liver Function"),
+    Analyte("bilirubin_d", "Bilirubin (Direct)",
+            ["direct bilirubin", "bilirubin direct", "bilirubin-direct",
+             "conjugated bilirubin"],
+            "mg/dL", 0.0, 0.3, "Liver Function"),
+    Analyte("bilirubin_i", "Bilirubin (Indirect)",
+            ["indirect bilirubin", "bilirubin indirect", "bilirubin-indirect",
+             "unconjugated bilirubin"],
+            "mg/dL", 0.2, 0.8, "Liver Function"),
+    Analyte("sgpt", "SGPT / ALT", ["sgpt", "alt", "alanine aminotransferase",
+            "sgpt (alt)"], "U/L", 7.0, 56.0, "Liver Function"),
+    Analyte("sgot", "SGOT / AST", ["sgot", "ast", "aspartate aminotransferase",
+            "sgot (ast)"], "U/L", 5.0, 40.0, "Liver Function"),
+    Analyte("alp", "Alkaline Phosphatase", ["alkaline phosphatase", "alp"],
+            "U/L", 44.0, 147.0, "Liver Function"),
+    Analyte("protein_total", "Total Protein", ["total protein", "protein total"],
+            "g/dL", 6.4, 8.3, "Liver Function"),
+    Analyte("albumin", "Albumin", ["albumin"], "g/dL", 3.5, 5.2, "Liver Function"),
+    Analyte("globulin", "Globulin", ["globulin"], "g/dL", 2.0, 3.5,
+            "Liver Function"),
+
+    # ---- Kidney and electrolytes ------------------------------------------ #
+    Analyte("urea", "Urea", ["blood urea", "urea"], "mg/dL", 15.0, 45.0,
+            "Kidney Function"),
+    Analyte("bun", "Blood Urea Nitrogen", ["blood urea nitrogen", "bun"],
+            "mg/dL", 7.0, 20.0, "Kidney Function"),
+    Analyte("creatinine", "Creatinine", ["serum creatinine", "creatinine"],
+            "mg/dL", 0.6, 1.3, "Kidney Function"),
+    Analyte("uric_acid", "Uric Acid", ["uric acid", "serum uric acid"], "mg/dL",
+            3.5, 7.2, "Kidney Function"),
+    Analyte("sodium", "Sodium", ["sodium", "na+", "serum sodium"], "mEq/L",
+            135.0, 145.0, "Electrolytes"),
+    Analyte("potassium", "Potassium", ["potassium", "k+", "serum potassium"],
+            "mEq/L", 3.5, 5.1, "Electrolytes"),
+    Analyte("chloride", "Chloride", ["chloride", "cl-"], "mEq/L", 98.0, 107.0,
+            "Electrolytes"),
+    Analyte("calcium", "Calcium", ["calcium", "serum calcium"], "mg/dL",
+            8.5, 10.5, "Electrolytes"),
+
+    # ---- Thyroid ---------------------------------------------------------- #
+    Analyte("tsh", "TSH", ["tsh", "thyroid stimulating hormone"], "µIU/mL",
+            0.4, 4.0, "Thyroid Profile"),
+    Analyte("t3", "T3 (Total)", ["total t3", "t3 total", "t3",
+            "triiodothyronine"], "ng/dL", 80.0, 200.0, "Thyroid Profile"),
+    Analyte("t4", "T4 (Total)", ["total t4", "t4 total", "t4", "thyroxine"],
+            "µg/dL", 5.1, 14.1, "Thyroid Profile"),
+    Analyte("ft3", "Free T3", ["free t3", "ft3"], "pg/mL", 2.3, 4.2,
+            "Thyroid Profile"),
+    Analyte("ft4", "Free T4", ["free t4", "ft4"], "ng/dL", 0.8, 1.8,
+            "Thyroid Profile"),
+
+    # ---- Vitamins and iron ------------------------------------------------ #
+    Analyte("vit_d", "Vitamin D (25-OH)",
+            ["vitamin d", "25 hydroxy vitamin d", "25-oh vitamin d",
+             "vitamin d3", "25(oh)d"], "ng/mL", 30.0, 100.0, "Vitamins"),
+    Analyte("vit_b12", "Vitamin B12", ["vitamin b12", "vit b12", "b12",
+            "cobalamin"], "pg/mL", 200.0, 900.0, "Vitamins"),
+    Analyte("ferritin", "Ferritin", ["ferritin", "serum ferritin"], "ng/mL",
+            20.0, 250.0, "Iron Studies"),
+    Analyte("iron", "Serum Iron", ["serum iron", "iron"], "µg/dL", 60.0, 170.0,
+            "Iron Studies"),
+    Analyte("tibc", "TIBC", ["tibc", "total iron binding capacity"], "µg/dL",
+            240.0, 450.0, "Iron Studies"),
+    Analyte("crp", "CRP", ["c reactive protein", "crp", "hs-crp"], "mg/L",
+            0.0, 6.0, "Inflammation"),
+]
+
+ANALYTES_BY_KEY = {a.key: a for a in ANALYTES}
+
+# Longest aliases first, so "total cholesterol" is tried before "cholesterol"
+# and "free t4" before "t4".
+_ALIAS_INDEX: list[tuple[str, Analyte]] = sorted(
+    ((alias, a) for a in ANALYTES for alias in a.aliases),
+    key=lambda pair: len(pair[0]), reverse=True,
+)
+
+# Every spelling of a unit seen on the sample reports. Indian labs print "Mg%",
+# "MG%", "mgs/dl" and "mg/dL" for the same thing, so all of them are listed.
+# Order matters: "mg%" must precede "%" or the shorter token wins first.
+UNIT_TOKENS = [
+    "million/µl", "million/ul", "millions/cumm", "lakhs/cumm", "10\\^3/µl",
+    "x10\\^3/µl", "µiu/ml", "uiu/ml", "miu/l",
+    "mgs/dl", "mgs/dl", "mg/dl", "gms/dl", "g/dl", "ng/dl",
+    "µg/dl", "ug/dl", "ng/ml", "pg/ml", "µg/l", "mg/l", "meq/l", "mmol/l",
+    "µmol/l", "iu/l", "u/l", "mm/hr", "/cumm", "cumm", "/µl", "/ul", "fl",
+    "mg%", "gm%", "gms%", "g%", "pg", "%",
+]
+_UNIT_RE = re.compile(r"(?<![A-Za-z0-9])(" + "|".join(UNIT_TOKENS) + r")(?![A-Za-z])",
+                      re.IGNORECASE)
+
+# "13.0 - 17.0", "13.0 to 17.0", "< 200", ">= 40", "0.3-1.2"
+_RANGE_BETWEEN = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(?:-|–|—|to)\s*(\d+(?:[.,]\d+)?)", re.IGNORECASE)
+_RANGE_BOUND = re.compile(r"(<=?|>=?|upto|up to|less than|greater than)\s*(\d+(?:[.,]\d+)?)",
+                          re.IGNORECASE)
+# (?<!\S) requires the number to start at a real token boundary -- preceded by
+# whitespace or the start of the string. Without it, a method/analyzer name
+# like "BIO RAD D-10 Analyzer" reads as containing the number -10 (from
+# "D-10"), and because it sits before the real result in the line, a bare
+# .search() finds that first and reports the analyzer's model number as the
+# patient's result. Confirmed on a real report: this genuinely turned an
+# HbA1c of 8.1 into -10 before the fix.
+#
+# (?![A-Za-z]) is the same guard on the other side. Without it, "Us TSH - 3rd
+# Generation 1.58 mIu/ml" reads as containing the number 3 (from "3rd") --
+# the digits of an ordinal are a perfectly valid-looking token on their left
+# side, and only checking what came before missed that "rd" glued onto the
+# right side means it is not a standalone number at all. Confirmed on a real
+# report: this genuinely turned a TSH of 1.58 into 3.
+_NUMBER = re.compile(
+    r"(?<!\S)[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![A-Za-z])"
+    r"|(?<!\S)[-+]?\d+(?:\.\d+)?(?![A-Za-z])")
+
+
+def _to_float(text: str) -> float | None:
+    try:
+        return float(text.replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+# =========================================================================== #
+#  3. RESULTS
+# =========================================================================== #
+
+@dataclass
+class AnalyteResult:
+    key: str
+    name: str
+    panel: str
+    value: str                       # exactly as read
+    numeric: float | None = None
+    unit: str = ""
+    ref_text: str = ""               # the range as printed
+    ref_low: float | None = None
+    ref_high: float | None = None
+    ref_source: str = "report"       # "report" or "builtin"
+    flag: str = "unknown"            # normal | high | low | unknown
+    confidence: float = 0.0
+    context: str = ""
+    note: str = ""
+
+
+@dataclass
+class BloodReport:
+    filename: str = ""
+    meta: dict[str, str] = field(default_factory=dict)
+    results: list[AnalyteResult] = field(default_factory=list)
+    full_text: str = ""
+    engine: str = ""
+    ocr_confidence: float = 0.0
+    elapsed: float = 0.0
+
+    @property
+    def out_of_range(self) -> list[AnalyteResult]:
+        # "check" belongs here too: a value flagged implausible is at least as
+        # worth a person's attention as a plain high or low, arguably more so.
+        return [r for r in self.results if r.flag in ("high", "low", "check")]
+
+    @property
+    def panels(self) -> list[str]:
+        seen: list[str] = []
+        for r in self.results:
+            if r.panel not in seen:
+                seen.append(r.panel)
+        return seen
+
+
+# =========================================================================== #
+#  4. ROW PARSING
+# =========================================================================== #
+
+# Test names suffer the same glyph confusions as ids do: "Bl.Sugar" comes back
+# as "BI.Sugar" because lowercase l and uppercase I are the same shape. Folding
+# those classes together lets a name match despite the misread.
+_FOLD = str.maketrans({"l": "i", "1": "i", "|": "i", "0": "o", "5": "s",
+                       "8": "b", "2": "z", "6": "g"})
+
+
+def _loose(text: str) -> str:
+    """Lowercase, drop punctuation and fold look-alike characters."""
+    return re.sub(r"[^a-z0-9]", "", text.lower()).translate(_FOLD)
+
+
+_LOOSE_INDEX: list[tuple[str, Analyte]] = sorted(
+    ((_loose(alias), a) for a in ANALYTES for alias in a.aliases),
+    key=lambda pair: len(pair[0]), reverse=True,
+)
+
+# Specimen/timing qualifiers a lab commonly prints ahead of a test's own name
+# -- "Serum Total Cholesterol", "Random Blood Sugar" -- which must not be
+# mistaken for a genuinely different word standing in front of the match
+# (see prefix_ok in _find_analyte).
+_PREFIX_QUALIFIERS = {
+    "serum", "plasma", "blood", "urine", "csf", "s", "sr", "b",
+    "fasting", "random", "post", "prandial", "pp", "venous", "capillary",
+    "whole", "fresh", "spot", "us", "ultra", "sensitive",
+}
+
+
+def _find_analyte(text: str) -> tuple[Analyte, int] | None:
+    """
+    Match the longest analyte alias appearing near the start of a row.
+
+    Restricted to the first part of the line because a range or a comment later
+    in the row can easily contain a word that looks like another analyte. An
+    exact match is tried first; only if that fails does it retry with look-alike
+    characters folded, so a clean name never loses to a fuzzy one.
+    """
+    lowered = text.lower()
+    head = lowered[:48]
+
+    for alias, analyte in _ALIAS_INDEX:
+        pos = head.find(alias)
+        if pos == -1:
+            continue
+        before_ok = pos == 0 or not lowered[pos - 1].isalnum()
+        after = pos + len(alias)
+        after_ok = after >= len(lowered) or not lowered[after].isalnum()
+        # A real word before the match usually means the alias is embedded
+        # inside a longer, unrelated name rather than being the row's own
+        # leading word -- "cholesterol" inside "NON HDL CHOLESTROL", "hdl"
+        # inside "CORONARY RISK RATIO-1 (T.CHOL/HDL)". Two exceptions: a
+        # specimen/timing qualifier ("Serum Total Cholesterol" is the same
+        # test, not a different one), and a clean "(ALIAS)" parenthetical --
+        # a lab's own abbreviation for the name just before it, e.g.
+        # "Glycoslated Hb% Conc. (HbA1c)" -- distinguished from the ratio
+        # case above by having nothing else inside the parentheses.
+        prefix_words = re.findall(r"[a-z]+", head[:pos])
+        qualifier_ok = all(w in _PREFIX_QUALIFIERS for w in prefix_words)
+        paren_ok = (pos > 0 and lowered[pos - 1] == "("
+                    and after < len(lowered) and lowered[after] == ")")
+        prefix_ok = pos == 0 or qualifier_ok or paren_ok
+        if before_ok and after_ok and prefix_ok:
+            return analyte, after      # index is longest-first: first hit wins
+
+    # Fallback: compare with look-alikes folded. Positions no longer line up
+    # after folding, so the split point is recovered by walking the original
+    # text until enough real characters have been consumed.
+    folded_head = _loose(head)
+    for alias, analyte in _LOOSE_INDEX:
+        if len(alias) < 4 or not folded_head.startswith(alias):
+            continue
+        consumed = 0
+        for i, ch in enumerate(text):
+            if re.match(r"[A-Za-z0-9]", ch):
+                consumed += 1
+            if consumed == len(alias):
+                return analyte, i + 1
+        break
+    return None
+
+
+def _parse_row(line: Line, sex: str | None = None) -> AnalyteResult | None:
+    """
+    Turn one visual line of a lab table into a result, or None.
+
+    `sex` comes from the report header. It is used only to choose between
+    ranges that genuinely differ -- never to alter a value.
+    """
+    text = line.text.strip()
+    if len(text) < 3:
+        return None
+
+    hit = _find_analyte(text)
+    if not hit:
+        return None
+    analyte, name_end = hit
+
+    tail = text[name_end:]
+    tail_original = tail
+
+    # Pull the reference range out first. It is the most distinctive thing on
+    # the row, and removing it stops its numbers being mistaken for the result.
+    ref_text, ref_low, ref_high = "", None, None
+    sex_resolved = False
+    between = _RANGE_BETWEEN.search(tail)
+    bound = _RANGE_BOUND.search(tail)
+
+    if between:
+        ref_text = between.group(0)
+        ref_low, ref_high = _to_float(between.group(1)), _to_float(between.group(2))
+        tail = tail[:between.start()] + " " + tail[between.end():]
+    elif bound:
+        ref_text = bound.group(0)
+        limit = _to_float(bound.group(2))
+        if bound.group(1).lower() in ("<", "<=", "upto", "up to", "less than"):
+            ref_high = limit
+        else:
+            ref_low = limit
+        tail = tail[:bound.start()] + " " + tail[bound.end():]
+
+    unit_match = _UNIT_RE.search(tail)
+    unit = unit_match.group(1) if unit_match else ""
+    if unit_match:
+        tail = tail[:unit_match.start()] + " " + tail[unit_match.end():]
+
+    # Remove *every* remaining range, not just the one taken as the reference.
+    # A row like "SERUM HDL 44 MG% men 30-70 women 30-85" carries two, and if
+    # the second survives, a bound from it gets reported as the patient's
+    # result. Reporting a reference number as a measurement is the worst thing
+    # this parser could do, so anything range-shaped is cleared out first.
+    tail = _RANGE_BETWEEN.sub(" ", tail)
+    tail = _RANGE_BOUND.sub(" ", tail)
+
+    number = _NUMBER.search(tail)
+    if not number:
+        return None
+    value_text = number.group(0)
+    numeric = _to_float(value_text)
+
+    # A row printing separate male and female ranges ("men 30-70 women 30-85")
+    # cannot be judged from the row alone. Reporting the first range would give
+    # a confident verdict against possibly the wrong sex, so the value is shown
+    # with its ranges and no verdict at all.
+    sex_split = bool(re.search(r"\b(?:men|male|women|female)\b", tail_original,
+                               re.IGNORECASE)) and len(_RANGE_BETWEEN.findall(
+                                   tail_original)) > 1
+
+    # ...unless the header told us which sex applies. Then the matching half is
+    # picked and the row is judged normally. Without a known sex it stays
+    # unjudged: there the ambiguity is real, not a missing feature.
+    if sex_split and sex:
+        which = r"wom[ae]n|female" if sex == "F" else r"m[ae]n|male"
+        picked = re.search(
+            rf"(?:{which})\D{{0,12}}?(\d+(?:[.,]\d+)?)\s*(?:-|–|—|to)\s*"
+            r"(\d+(?:[.,]\d+)?)",
+            tail_original, re.IGNORECASE)
+        if picked:
+            ref_low = _to_float(picked.group(1))
+            ref_high = _to_float(picked.group(2))
+            ref_text = picked.group(0).strip()
+            sex_split = False
+            sex_resolved = True
+
+    ref_source = "report"
+    if ref_low is None and ref_high is None:
+        ref_low, ref_high = analyte.range_for(sex)
+        ref_source = "builtin"
+        if ref_low is not None and ref_high is not None:
+            ref_text = f"{ref_low:g} - {ref_high:g}"
+        elif ref_high is not None:
+            ref_text = f"< {ref_high:g}"
+        elif ref_low is not None:
+            ref_text = f"> {ref_low:g}"
+
+    flag, implausible_note = ("unknown", "") if sex_split else _verdict(
+        numeric, ref_low, ref_high)
+
+    note = ""
+    if implausible_note:
+        note = implausible_note
+    elif sex_resolved:
+        note = (f"the report prints ranges by sex; the "
+                f"{'female' if sex == 'F' else 'male'} range was used")
+    elif sex_split:
+        ref_text = _clean_plain(tail_original[tail_original.lower().find(
+            next(w for w in ("men", "male", "women", "female")
+                 if w in tail_original.lower())):])[:60]
+        note = ("the report prints separate ranges by sex -- not judged here, "
+                "read the range that applies")
+    elif ref_source == "builtin" and (ref_low is not None or ref_high is not None):
+        note = ("no range printed on the report; compared against a typical adult"
+                + (f" {'female' if sex == 'F' else 'male'} range" if sex and
+                   (analyte.low_f is not None or analyte.high_f is not None)
+                   else " range"))
+        if analyte.note:
+            note += f" ({analyte.note})"
+    elif ref_low is None and ref_high is None:
+        # Nothing printed and no built-in range: report the number, judge nothing.
+        note = "no reference range printed and none assumed -- value shown as read"
+
+    return AnalyteResult(
+        key=analyte.key, name=analyte.name, panel=analyte.panel,
+        value=value_text, numeric=numeric, unit=unit or analyte.unit,
+        ref_text=ref_text.strip(), ref_low=ref_low, ref_high=ref_high,
+        ref_source=ref_source, flag=flag,
+        confidence=round(min(0.99, line.conf), 3),
+        context=text[:120], note=note,
+    )
+
+
+# Lines that look like a test row but are really headers, footers or the
+# interpretation tables labs print under HbA1c ("Non-Diabetes 4.0 to 6.0").
+_NOT_A_ROW = re.compile(
+    r"\b(?:page|report|end of|signature|verified|technician|pathologist|"
+    r"consultant|address|phone|mobile|email|gstin|nabl|iso|bill no|"
+    r"registration|printed|note|comment|method|interval|guidance|"
+    r"good control|fair control|poor control|unsatisfactory|"
+    # Stems, not whole words: the interpretation tables say "Non-Diabetes",
+    # "Diabetic" and "Prediabetic", and a trailing \b would refuse to match
+    # any of them because a letter follows the stem.
+    r"non.?diabet\w*|diabet\w*|borderline|desirable|degree of control)",
+    re.IGNORECASE)
+
+
+def parse_reference(ref_text: str) -> tuple[float | None, float | None, bool]:
+    """
+    Read a printed reference range back into bounds.
+
+    Returns (low, high, ambiguous). `ambiguous` is True when the text carries
+    more than one range and no sex was resolved -- those must not be judged.
+    """
+    if not ref_text:
+        return None, None, False
+
+    if (re.search(r"\b(?:men|male|women|female)\b", ref_text, re.IGNORECASE)
+            and len(_RANGE_BETWEEN.findall(ref_text)) > 1):
+        return None, None, True
+
+    between = _RANGE_BETWEEN.search(ref_text)
+    if between:
+        return _to_float(between.group(1)), _to_float(between.group(2)), False
+
+    bound = _RANGE_BOUND.search(ref_text)
+    if bound:
+        limit = _to_float(bound.group(2))
+        if bound.group(1).lower() in ("<", "<=", "upto", "up to", "less than"):
+            return None, limit, False
+        return limit, None, False
+
+    return None, None, False
+
+
+# A result more than this many multiples beyond the reference bound is judged
+# "check" rather than a plain high/low -- flagged as needing a human look
+# rather than presented as a confident clinical reading. Confirmed on a real
+# report: a printed 163.2 mg/dL cholesterol came back from OCR as 1632 (the
+# decimal point was not recognised), an 8x inflation, and was shown as a plain
+# HIGH result indistinguishable from a genuinely elevated one. Every real HIGH
+# reading measured this session -- HbA1c 8.1 against a ref up to 5.6/6.4,
+# glucose 133.4 and 180.9 against refs of 110/140, LDL 147 against 130 -- sat
+# under 1.5x its bound, so 4x leaves a wide, safe margin between "genuinely
+# elevated" and "very likely a misread digit or dropped decimal point."
+_IMPLAUSIBLE_MULTIPLE = 4.0
+
+
+def _verdict(numeric: float | None, low: float | None,
+            high: float | None) -> tuple[str, str]:
+    """
+    The one place a value + range becomes a flag.
+
+    Both the initial parse (_parse_row) and the export-time recompute
+    (flag_for) call this, so a value edited after the fact is judged exactly
+    the way it was judged the first time -- no separately-maintained copy of
+    this logic to drift out of sync with this one.
+
+    Returns (flag, note). flag is one of normal / high / low / check /
+    unknown. "check" means implausible, not just outside range -- see
+    _IMPLAUSIBLE_MULTIPLE above.
+    """
+    if numeric is None or (low is None and high is None):
+        return "unknown", ""
+
+    if high is not None and high > 0 and numeric > high * _IMPLAUSIBLE_MULTIPLE:
+        return "check", (
+            f"{numeric:g} is over {_IMPLAUSIBLE_MULTIPLE:g}x the upper end of "
+            f"the range -- more likely a misread (a dropped decimal point, a "
+            f"doubled digit) than a real result. Verify against the original "
+            f"report before using this value.")
+    if low is not None and low > 0 and numeric < low / _IMPLAUSIBLE_MULTIPLE:
+        return "check", (
+            f"{numeric:g} is under a quarter of the lower end of the range -- "
+            f"more likely a misread than a real result. Verify against the "
+            f"original report before using this value.")
+
+    if high is not None and numeric > high:
+        return "high", ""
+    if low is not None and numeric < low:
+        return "low", ""
+    return "normal", ""
+
+
+def flag_for(value_text: str, ref_text: str) -> str:
+    """
+    Recompute a verdict from a value and the range shown beside it.
+
+    The export path calls this instead of believing the flag the browser sent.
+    A user can edit a result after it was first judged, and a document that
+    carries a stale HIGH next to a corrected number would be worse than one
+    carrying no verdict at all.
+    """
+    numeric = _to_float(re.sub(r"[^\d.,\-]", "", value_text or ""))
+    if numeric is None:
+        return "unknown"
+
+    low, high, ambiguous = parse_reference(ref_text)
+    if ambiguous:
+        return "unknown"
+    flag, _note = _verdict(numeric, low, high)
+    return flag
+
+
+def _parse_unknown_row(line: Line) -> AnalyteResult | None:
+    """
+    Capture a table row whose test is not in ANALYTES.
+
+    Every lab prints a slightly different menu, so a fixed dictionary will always
+    miss something. Rather than drop those rows silently -- which would let a
+    report look fully read when it was not -- anything row-shaped is surfaced
+    under "Other rows", named exactly as printed and never flagged.
+    """
+    text = line.text.strip()
+    if len(text) < 6 or _NOT_A_ROW.search(text):
+        return None
+
+    number = _NUMBER.search(text)
+    if not number or number.start() == 0:
+        return None                     # a row must be named before its value
+
+    name = text[:number.start()].strip(" :.-|\t")
+    # Strip a trailing method column ("GOD-POD", "H.P.L.C") off the name.
+    name = re.sub(r"\s+[A-Z][A-Z.\-]{2,}$", "", name).strip(" :.-")
+
+    letters = sum(ch.isalpha() for ch in name)
+    if letters < 3 or len(name) > 46:
+        return None
+    if not re.match(r"^[A-Za-z]", name):
+        return None
+
+    tail = text[number.end():]
+    unit_match = _UNIT_RE.search(tail)
+    ref = _RANGE_BETWEEN.search(tail) or _RANGE_BOUND.search(tail)
+
+    # Require some corroboration that this really is a measurement row.
+    if not unit_match and not ref:
+        return None
+
+    return AnalyteResult(
+        key=f"other::{name.lower()}", name=name, panel="Other rows",
+        value=number.group(0), numeric=_to_float(number.group(0)),
+        unit=unit_match.group(1) if unit_match else "",
+        ref_text=ref.group(0).strip() if ref else "",
+        ref_source="report", flag="unknown",
+        confidence=round(min(0.99, line.conf * 0.85), 3),
+        context=text[:120],
+        note="not a test this tool knows; shown exactly as printed, not judged",
+    )
+
+
+def extract_report(ocr: OcrResult, filename: str = "") -> BloodReport:
+    """Read patient metadata and every analyte row out of an OCR'd report."""
+    meta_hits = core.extract_fields(ocr, enabled=(), custom_rules=META_RULES)
+    meta = {key: hits[0].value for key, hits in meta_hits.items() if hits}
+    sex = detect_sex(meta)
+
+    # Rows come from the single best read. Voting across variants does not help
+    # here the way it does for an id -- a mangled row simply fails to parse and
+    # the correct read of it wins by being the only one that parsed at all.
+    reads = ocr.variants or [ocr]
+    best_by_key: dict[tuple[str, int], AnalyteResult] = {}
+    unknown: dict[str, AnalyteResult] = {}
+    claimed_context: set[str] = set()
+
+    for read in reads:
+        # Rows are keyed by (analyte, how many times it has already appeared in
+        # THIS read). Keying on the analyte alone would silently discard the
+        # second fasting glucose on a report that lists two, while keying on the
+        # value would split one row into several when variants misread it
+        # differently. Occurrence order survives both.
+        seen_in_read: Counter = Counter()
+        for line in read.lines:
+            row = _parse_row(line, sex)
+            if row is not None:
+                occurrence = seen_in_read[row.key]
+                seen_in_read[row.key] += 1
+                if occurrence:
+                    row.note = (row.note + "; " if row.note else "") + \
+                        f"reading {occurrence + 1} of this test on the report"
+                claimed_context.add(row.context)
+                slot = (row.key, occurrence)
+                current = best_by_key.get(slot)
+                if current is None or row.confidence > current.confidence:
+                    best_by_key[slot] = row
+
+    # Second pass for rows no analyte claimed, so an unusual test still shows up.
+    for read in reads:
+        for line in read.lines:
+            if line.text[:120] in claimed_context:
+                continue
+            if _parse_row(line, sex) is not None:
+                continue
+            extra = _parse_unknown_row(line)
+            if extra is None:
+                continue
+            current = unknown.get(extra.key)
+            if current is None or extra.confidence > current.confidence:
+                unknown[extra.key] = extra
+
+    order = {a.key: i for i, a in enumerate(ANALYTES)}
+    # Sort by analyte, then by which reading it was.
+    results = [row for _, row in sorted(
+        best_by_key.items(),
+        key=lambda kv: (order.get(kv[0][0], 999), kv[0][1]))]
+
+    # A variant that ran the words together (or dropped a space) produces a
+    # different line than the one an analyte claimed, so the same measurement
+    # can arrive twice: once recognised, once as "unknown." Compared against
+    # the recognised row's own NAME here, this dedup silently failed on real
+    # data -- an analyte's name is my chosen display label ("Glucose
+    # (Fasting)"), which is never what the report itself printed ("Blood Sugar
+    # (F)"), so the two could never match. What both reads actually share is
+    # the raw line they came from, so that -- loose-folded, to absorb the
+    # exact spacing difference between the two OCR passes -- is what gets
+    # compared instead.
+    taken_contexts = {_loose(r.context) for r in results if r.context}
+    for extra in sorted(unknown.values(), key=lambda r: r.name.lower()):
+        if extra.context and _loose(extra.context) in taken_contexts:
+            continue
+        results.append(extra)
+
+    return BloodReport(
+        filename=filename, meta=meta, results=results, full_text=ocr.text,
+        engine=ocr.engine, ocr_confidence=ocr.mean_conf, elapsed=ocr.elapsed,
+    )
+
+
+# =========================================================================== #
+#  5. EXPORT
+# =========================================================================== #
+
+def _timestamp() -> str:
+    return datetime.now().strftime("%d %b %Y, %I:%M %p")
+
+
+FLAG_WORD = {"high": "HIGH", "low": "LOW", "normal": "Normal",
+            "check": "CHECK", "unknown": "-"}
+
+
+def _rows(report: BloodReport) -> list[dict]:
+    return [{
+        "file": report.filename,
+        "panel": r.panel,
+        "test": r.name,
+        "result": r.value,
+        "unit": r.unit,
+        "reference_range": r.ref_text,
+        "range_source": r.ref_source,
+        "flag": FLAG_WORD.get(r.flag, "-"),
+        "note": r.note,
+    } for r in report.results]
+
+
+def build_csv(reports: Sequence[BloodReport]) -> bytes:
+    columns = ["file", "panel", "test", "result", "unit", "reference_range",
+               "range_source", "flag", "note"]
+    out = io.StringIO(newline="")
+    writer = csv.DictWriter(out, fieldnames=columns, extrasaction="ignore")
+    writer.writeheader()
+    for report in reports:
+        writer.writerows(_rows(report))
+    return out.getvalue().encode("utf-8-sig")
+
+
+def build_json(reports: Sequence[BloodReport], include_raw_text: bool = True) -> bytes:
+    payload = {
+        "tool": REPORT_TITLE,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "disclaimer": DISCLAIMER,
+        "report_count": len(reports),
+        "reports": [],
+    }
+    for report in reports:
+        entry = {
+            "file": report.filename,
+            "ocr_engine": report.engine,
+            "ocr_confidence": round(report.ocr_confidence, 3),
+            "patient": report.meta,
+            "results": [{
+                "test": r.name, "panel": r.panel, "result": r.value,
+                "numeric": r.numeric, "unit": r.unit,
+                "reference_range": r.ref_text, "range_source": r.ref_source,
+                "flag": r.flag, "note": r.note,
+            } for r in report.results],
+            "out_of_range": [r.name for r in report.out_of_range],
+        }
+        if include_raw_text:
+            entry["full_text"] = report.full_text
+        payload["reports"].append(entry)
+    return json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
+
+
+def build_txt(reports: Sequence[BloodReport], include_raw_text: bool = False) -> bytes:
+    out = io.StringIO()
+    out.write(f"{REPORT_TITLE}\n{'=' * len(REPORT_TITLE)}\n")
+    out.write(f"Generated : {_timestamp()}\nReports   : {len(reports)}\n\n")
+    out.write(DISCLAIMER + "\n")
+
+    for idx, report in enumerate(reports, start=1):
+        out.write(f"\n\n[{idx}] {report.filename}\n")
+        out.write("-" * (len(report.filename) + 6) + "\n")
+        for key in META_ORDER:
+            if report.meta.get(key):
+                label = next(r.label for r in META_RULES if r.key == key)
+                out.write(f"  {label:<20}: {report.meta[key]}\n")
+
+        out.write(f"\n  {'Test':<28}{'Result':>12} {'Unit':<12}"
+                  f"{'Reference':<22}{'Flag':<8}\n")
+        out.write("  " + "-" * 82 + "\n")
+        for r in report.results:
+            out.write(f"  {r.name:<28}{r.value:>12} {r.unit:<12}"
+                      f"{r.ref_text:<22}{FLAG_WORD.get(r.flag, '-'):<8}\n")
+
+        flagged = report.out_of_range
+        out.write(f"\n  Outside the printed range: "
+                  f"{', '.join(r.name for r in flagged) if flagged else 'none'}\n")
+
+        if include_raw_text and report.full_text:
+            out.write("\n  --- Full OCR text ---\n")
+            for line in report.full_text.splitlines():
+                out.write(f"  {line}\n")
+
+    return out.getvalue().encode("utf-8")
+
+
+def build_docx(reports: Sequence[BloodReport], include_raw_text: bool = False) -> bytes:
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+
+    doc = Document()
+    doc.add_heading(REPORT_TITLE, level=0)
+    meta_para = doc.add_paragraph()
+    meta_para.add_run(f"Generated: {_timestamp()}    "
+                      f"Reports: {len(reports)}").italic = True
+
+    note = doc.add_paragraph(DISCLAIMER)
+    for run in note.runs:
+        run.font.size = Pt(8.5)
+        run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+
+    for idx, report in enumerate(reports, start=1):
+        doc.add_heading(f"{idx}. {report.filename}", level=1)
+
+        if report.meta:
+            info = doc.add_table(rows=0, cols=2)
+            info.style = "Light List Accent 1"
+            for key in META_ORDER:
+                if report.meta.get(key):
+                    label = next(r.label for r in META_RULES if r.key == key)
+                    cells = info.add_row().cells
+                    cells[0].text = label
+                    cells[1].text = report.meta[key]
+            doc.add_paragraph()
+
+        if not report.results:
+            doc.add_paragraph("No test rows were recognised in this report.")
+            continue
+
+        table = doc.add_table(rows=1, cols=5)
+        table.style = "Light Grid Accent 1"
+        for cell, heading in zip(table.rows[0].cells,
+                                 ["Test", "Result", "Unit", "Reference", "Flag"]):
+            cell.text = heading
+            for para in cell.paragraphs:
+                for run in para.runs:
+                    run.bold = True
+
+        for r in report.results:
+            cells = table.add_row().cells
+            cells[0].text = r.name
+            cells[1].text = r.value
+            cells[2].text = r.unit
+            cells[3].text = r.ref_text
+            cells[4].text = FLAG_WORD.get(r.flag, "-")
+            for para in cells[1].paragraphs:
+                for run in para.runs:
+                    run.bold = True
+            # "check" gets its own colour, distinct from clinical high/low --
+            # it means "likely a misread," not "genuinely elevated."
+            flag_colour = {"high": RGBColor(0xC0, 0x39, 0x2B),
+                           "low": RGBColor(0xB7, 0x79, 0x0B),
+                           "check": RGBColor(0x7B, 0x3F, 0xB2)}.get(r.flag)
+            if flag_colour:
+                for para in cells[4].paragraphs:
+                    for run in para.runs:
+                        run.bold = True
+                        run.font.color.rgb = flag_colour
+
+        flagged = report.out_of_range
+        summary = doc.add_paragraph()
+        summary.add_run("Outside the printed range: ").bold = True
+        summary.add_run(", ".join(r.name for r in flagged) if flagged else "none")
+
+        borrowed = [r for r in report.results if r.ref_source == "builtin"]
+        if borrowed:
+            warn = doc.add_paragraph(
+                f"{len(borrowed)} test(s) had no reference range printed on the "
+                f"report; a typical adult range was used instead: "
+                f"{', '.join(r.name for r in borrowed)}.")
+            for run in warn.runs:
+                run.font.size = Pt(8.5)
+                run.font.color.rgb = RGBColor(0x99, 0x66, 0x00)
+
+        if include_raw_text and report.full_text:
+            doc.add_heading("Full OCR text", level=2)
+            block = doc.add_paragraph(report.full_text)
+            for run in block.runs:
+                run.font.name = "Consolas"
+                run.font.size = Pt(8)
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    return buffer.getvalue()
+
+
+def build_pdf(reports: Sequence[BloodReport], include_raw_text: bool = False) -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (PageBreak, Paragraph, SimpleDocTemplate,
+                                    Spacer, Table, TableStyle)
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4,
+                            leftMargin=16 * mm, rightMargin=16 * mm,
+                            topMargin=15 * mm, bottomMargin=15 * mm,
+                            title=REPORT_TITLE)
+
+    styles = getSampleStyleSheet()
+    meta_style = ParagraphStyle("meta", parent=styles["Normal"], fontSize=8,
+                                textColor=colors.HexColor("#666666"), leading=11)
+    cell = ParagraphStyle("cell", parent=styles["Normal"], fontSize=8.5, leading=11)
+    bold = ParagraphStyle("bold", parent=cell, fontName="Helvetica-Bold")
+    mono = ParagraphStyle("mono", parent=styles["Normal"], fontName="Courier",
+                          fontSize=7, leading=9)
+
+    story = [
+        Paragraph(REPORT_TITLE, styles["Title"]),
+        Paragraph(f"Generated: {_timestamp()} &nbsp;|&nbsp; Reports: {len(reports)}",
+                  meta_style),
+        Spacer(1, 3 * mm),
+        Paragraph(core._latin1_safe(DISCLAIMER), meta_style),
+        Spacer(1, 6 * mm),
+    ]
+
+    for idx, report in enumerate(reports, start=1):
+        story.append(Paragraph(f"{idx}. {escape(core._latin1_safe(report.filename))}",
+                               styles["Heading2"]))
+
+        if report.meta:
+            bits = []
+            for key in META_ORDER:
+                if report.meta.get(key):
+                    label = next(r.label for r in META_RULES if r.key == key)
+                    bits.append(f"<b>{label}:</b> "
+                                f"{escape(core._latin1_safe(report.meta[key]))}")
+            story.append(Paragraph(" &nbsp;|&nbsp; ".join(bits), cell))
+            story.append(Spacer(1, 3 * mm))
+
+        if not report.results:
+            story.append(Paragraph("No test rows were recognised.", cell))
+            story.append(PageBreak() if idx < len(reports) else Spacer(1, 4 * mm))
+            continue
+
+        data = [[Paragraph(f"<b>{h}</b>", cell)
+                 for h in ("Test", "Result", "Unit", "Reference", "Flag")]]
+        flag_rows: list[tuple[int, str]] = []
+        for n, r in enumerate(report.results, start=1):
+            if r.flag in ("high", "low", "check"):
+                flag_rows.append((n, r.flag))
+            data.append([
+                Paragraph(escape(core._latin1_safe(r.name)), cell),
+                Paragraph(escape(core._latin1_safe(r.value)), bold),
+                Paragraph(escape(core._latin1_safe(r.unit)), cell),
+                Paragraph(escape(core._latin1_safe(r.ref_text)), cell),
+                Paragraph(FLAG_WORD.get(r.flag, "-"), bold),
+            ])
+
+        table = Table(data, colWidths=[54 * mm, 24 * mm, 24 * mm, 42 * mm, 20 * mm],
+                      repeatRows=1)
+        style = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#c8d0da")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+             [colors.white, colors.HexColor("#f4f7fb")]),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]
+        # "check" gets its own colour, distinct from clinical high/low -- it
+        # means "likely a misread," not "genuinely elevated."
+        flag_pdf_colour = {"high": colors.HexColor("#c0392b"),
+                           "low": colors.HexColor("#b7790b"),
+                           "check": colors.HexColor("#7b3fb2")}
+        for row_no, flag in flag_rows:
+            style.append(("TEXTCOLOR", (4, row_no), (4, row_no),
+                          flag_pdf_colour[flag]))
+        table.setStyle(TableStyle(style))
+        story.append(table)
+
+        flagged = report.out_of_range
+        story.append(Spacer(1, 3 * mm))
+        story.append(Paragraph(
+            "<b>Outside the printed range:</b> " +
+            (escape(core._latin1_safe(", ".join(r.name for r in flagged)))
+             if flagged else "none"), cell))
+
+        borrowed = [r for r in report.results if r.ref_source == "builtin"]
+        if borrowed:
+            story.append(Paragraph(
+                f"{len(borrowed)} test(s) had no printed range; a typical adult "
+                f"range was used: "
+                f"{escape(core._latin1_safe(', '.join(r.name for r in borrowed)))}.",
+                meta_style))
+
+        if include_raw_text and report.full_text:
+            story.append(Spacer(1, 3 * mm))
+            story.append(Paragraph("Full OCR text", styles["Heading4"]))
+            for line in core._latin1_safe(report.full_text).splitlines():
+                if line.strip():
+                    story.append(Paragraph(escape(line), mono))
+
+        if idx < len(reports):
+            story.append(PageBreak())
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
+EXPORTERS = {
+    "docx": (build_docx, "blood_report.docx",
+             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    "pdf": (build_pdf, "blood_report.pdf", "application/pdf"),
+    "csv": (build_csv, "blood_report.csv", "text/csv"),
+    "json": (build_json, "blood_report.json", "application/json"),
+    "txt": (build_txt, "blood_report.txt", "text/plain"),
+}
+
+
+# =========================================================================== #
+#  6. SELF TEST
+# =========================================================================== #
+
+SAMPLES = core.HERE / "samples"
+
+SAMPLE_ROWS = [
+    ("Haemoglobin", "11.2", "g/dL", "13.0 - 17.0"),
+    ("Total Leucocyte Count", "9800", "/cumm", "4000 - 11000"),
+    ("Platelet Count", "210000", "/cumm", "150000 - 450000"),
+    ("Fasting Blood Sugar", "112", "mg/dL", "70 - 100"),
+    ("HbA1c", "6.4", "%", "4.0 - 5.6"),
+    ("Total Cholesterol", "186", "mg/dL", "< 200"),
+    ("HDL Cholesterol", "38", "mg/dL", "> 40"),
+    ("Triglycerides", "168", "mg/dL", "< 150"),
+    ("Serum Creatinine", "0.9", "mg/dL", "0.6 - 1.3"),
+    ("SGPT", "62", "U/L", "7 - 56"),
+    ("TSH", "3.1", "uIU/mL", "0.4 - 4.0"),
+    ("Vitamin D", "18.5", "ng/mL", "30 - 100"),
+]
+
+# Values chosen so the flags are unambiguous arithmetic.
+EXPECTED_FLAGS = {
+    "haemoglobin": "low", "wbc": "normal", "platelet": "normal",
+    "glucose_f": "high", "hba1c": "high", "chol_total": "normal",
+    "hdl": "low", "triglycerides": "high", "creatinine": "normal",
+    "sgpt": "high", "tsh": "normal", "vit_d": "low",
+}
+
+
+def make_sample_report(path: Path) -> Path:
+    """Draw a lab report resembling the layout Indian labs actually print."""
+    from PIL import Image, ImageDraw
+
+    width, height = 1000, 1080
+    img = Image.new("RGB", (width, height), "#ffffff")
+    d = ImageDraw.Draw(img)
+
+    d.rectangle([0, 0, width, 96], fill="#12386b")
+    d.text((40, 30), "SUNRISE DIAGNOSTICS", font=core._font(30, True), fill="#ffffff")
+
+    info = [("Patient Name", "Meera Nair"), ("Age/Sex", "42 Y / F"),
+            ("Patient ID", "SD2026081455"), ("Referred By", "Dr Anand Rao"),
+            ("Collected On", "17 Aug 2026"), ("Reported On", "18 Aug 2026")]
+    y = 124
+    for label, value in info[:3]:
+        d.text((40, y), f"{label}", font=core._font(19), fill="#6b7684")
+        d.text((210, y), value, font=core._font(19, True), fill="#111820")
+        y += 30
+    y = 124
+    for label, value in info[3:]:
+        d.text((540, y), f"{label}", font=core._font(19), fill="#6b7684")
+        d.text((700, y), value, font=core._font(19, True), fill="#111820")
+        y += 30
+
+    y = 244
+    d.line([(40, y), (width - 40, y)], fill="#12386b", width=2)
+    y += 14
+    for head, x in [("TEST", 40), ("RESULT", 470), ("UNIT", 620), ("REFERENCE", 760)]:
+        d.text((x, y), head, font=core._font(18, True), fill="#12386b")
+    y += 30
+    d.line([(40, y), (width - 40, y)], fill="#c8d0da", width=1)
+    y += 14
+
+    for name, value, unit, ref in SAMPLE_ROWS:
+        d.text((40, y), name, font=core._font(20), fill="#111820")
+        d.text((470, y), value, font=core._font(20, True), fill="#111820")
+        d.text((620, y), unit, font=core._font(20), fill="#4a5460")
+        d.text((760, y), ref, font=core._font(20), fill="#4a5460")
+        y += 40
+
+    d.text((40, y + 24), "** End of Report **", font=core._font(18), fill="#8a94a6")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(path)
+    return path
+
+
+def run_selftest() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    if not core.available_engines():
+        print("FAIL: no OCR engine. pip install rapidocr-onnxruntime")
+        return 1
+
+    sample = make_sample_report(SAMPLES / "sample_bloodtest.png")
+    print(f"Sample report written : {sample}")
+
+    ocr = core.read_image(sample, accuracy="fast")
+    report = extract_report(ocr, filename=sample.name)
+    print(f"OCR engine            : {report.engine}  "
+          f"confidence {report.ocr_confidence:.0%}")
+
+    print("\n--- Patient details ---")
+    for key in META_ORDER:
+        if report.meta.get(key):
+            label = next(r.label for r in META_RULES if r.key == key)
+            print(f"  {label:<20}: {report.meta[key]}")
+
+    print(f"\n--- Test rows ({len(report.results)} of {len(SAMPLE_ROWS)}) ---")
+    print(f"  {'Test':<30}{'Result':>10} {'Unit':<10}{'Reference':<18}"
+          f"{'Flag':<8}{'Range from'}")
+    for r in report.results:
+        print(f"  {r.name:<30}{r.value:>10} {r.unit:<10}{r.ref_text:<18}"
+              f"{FLAG_WORD.get(r.flag, '-'):<8}{r.ref_source}")
+
+    print("\n--- Export formats ---")
+    for ext, (builder, _, _) in EXPORTERS.items():
+        blob = builder([report]) if ext == "csv" else builder([report], False)
+        out = SAMPLES / f"sample_bloodtest.{ext}"
+        out.write_bytes(blob)
+        print(f"  {ext:<5} {len(blob):>8,} bytes -> {out.name}")
+
+    print("\n--- Flag check (arithmetic against the printed range) ---")
+    found = {r.key: r.flag for r in report.results}
+    wrong, missing = [], []
+    for key, expected in EXPECTED_FLAGS.items():
+        name = ANALYTES_BY_KEY[key].name
+        if key not in found:
+            missing.append(name)
+            print(f"  {name:<30} NOT FOUND (expected {expected})")
+        elif found[key] != expected:
+            wrong.append(name)
+            print(f"  {name:<30} got {found[key]:<8} expected {expected}  MISMATCH")
+        else:
+            print(f"  {name:<30} {found[key]:<8} OK")
+
+    recall = (len(EXPECTED_FLAGS) - len(missing)) / len(EXPECTED_FLAGS)
+    print(f"\nrows found: {len(EXPECTED_FLAGS) - len(missing)}/{len(EXPECTED_FLAGS)} "
+          f"({recall:.0%})   wrong flags: {len(wrong)}")
+
+    if wrong or recall < 0.8:
+        print("\nFAIL")
+        return 1
+    print("\nPASS: rows parsed, ranges read from the report, flags correct.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run_selftest())

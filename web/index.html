@@ -1,0 +1,1308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UTR Extractor</title>
+<style>
+/* ------------------------------------------------------------------ theme */
+:root {
+  --bg: #f5f7fa;
+  --panel: #ffffff;
+  --panel-2: #fbfcfe;
+  --ink: #131a24;
+  --ink-2: #5b6675;
+  --ink-3: #8a94a6;
+  --line: #e2e7ee;
+  --accent: #3d7eff;
+  --accent-soft: rgba(61, 126, 255, 0.10);
+  --high: #1e9c5a;   --high-bg: rgba(35, 160, 90, 0.14);
+  --med: #c88a12;    --med-bg: rgba(220, 160, 30, 0.16);
+  --low: #d24545;    --low-bg: rgba(220, 70, 70, 0.14);
+  /* Deliberately a fourth colour, not a shade of red/amber -- "check" means
+     "verify this, it's likely a misread," not "clinically elevated," and it
+     must never be mistaken for one at a glance. */
+  --check: #7b3fb2;  --check-bg: rgba(123, 63, 178, 0.14);
+  --radius: 10px;
+  --mono: ui-monospace, "Cascadia Code", Consolas, "SF Mono", monospace;
+  --shadow: 0 1px 2px rgba(20, 30, 50, .05), 0 4px 16px rgba(20, 30, 50, .05);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f141b; --panel: #161d27; --panel-2: #1b2431;
+    --ink: #e8edf4; --ink-2: #a2adbd; --ink-3: #6f7c8f;
+    --line: #262f3d; --accent: #5b93ff; --accent-soft: rgba(91, 147, 255, .14);
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; cursor: pointer; }
+input, select { font: inherit; color: inherit; }
+
+/* ----------------------------------------------------------------- layout */
+.app { display: grid; grid-template-columns: 380px 1fr; height: 100vh; }
+.sidebar {
+  background: var(--panel); border-right: 1px solid var(--line);
+  overflow-y: auto; padding: 20px 18px 40px;
+}
+.main { overflow-y: auto; padding: 26px 32px 60px; }
+@media (max-width: 980px) {
+  .app { grid-template-columns: 1fr; height: auto; }
+  .sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
+}
+
+/* ------------------------------------------------------------- typography */
+.brand { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 16px; }
+.brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+h1 { font-size: 26px; letter-spacing: -.02em; margin: 0 0 5px; }
+.lede { color: var(--ink-2); margin: 0 0 24px; max-width: 62ch; }
+.sec-title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
+  color: var(--ink-3); font-weight: 700; margin: 22px 0 10px;
+}
+.muted { color: var(--ink-3); font-size: 12px; }
+
+/* --------------------------------------------------------------- dropzone */
+.drop {
+  border: 1.5px dashed var(--line); border-radius: 14px; background: var(--panel);
+  padding: 34px 24px; text-align: center; transition: .15s; margin-bottom: 22px;
+}
+.drop.over { border-color: var(--accent); background: var(--accent-soft); }
+.drop h3 { margin: 0 0 6px; font-size: 16px; }
+.drop p { margin: 0 0 16px; color: var(--ink-2); font-size: 13px; }
+.btn {
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
+  padding: 8px 15px; border-radius: 8px; font-weight: 600; font-size: 13px;
+  transition: .12s;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { filter: brightness(1.08); color: #fff; }
+.btn.block { display: block; width: 100%; margin-bottom: 8px; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ----------------------------------------------------------------- panels */
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); margin-bottom: 18px; overflow: hidden;
+}
+.card-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 13px 16px; border-bottom: 1px solid var(--line); background: var(--panel-2);
+}
+.card-head .name { font-weight: 650; font-size: 14px; word-break: break-all; }
+.card-body { padding: 16px; }
+.split { display: grid; grid-template-columns: 260px 1fr; gap: 20px; }
+@media (max-width: 780px) { .split { grid-template-columns: 1fr; } }
+.shot {
+  width: 100%; border-radius: 8px; border: 1px solid var(--line); display: block;
+  background: var(--panel-2);
+}
+
+/* ----------------------------------------------------------------- metrics */
+.metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+@media (max-width: 780px) { .metrics { grid-template-columns: repeat(2, 1fr); } }
+.metric {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.metric .k { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-3); font-weight: 700; }
+.metric .v { font-size: 22px; font-weight: 700; letter-spacing: -.02em; margin-top: 3px; }
+
+/* ------------------------------------------------------------------ table */
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--ink-3); font-weight: 700; padding: 0 8px 8px; border-bottom: 1px solid var(--line);
+}
+td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+tr:last-child td { border-bottom: 0; }
+.f-label { color: var(--ink-2); font-size: 13px; width: 34%; }
+.val-input {
+  width: 100%; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 7px; padding: 7px 9px; font-family: var(--mono);
+  font-size: 13px; font-weight: 600;
+}
+.val-input:focus { outline: none; border-color: var(--accent); background: var(--panel); }
+.val-input.edited { border-color: var(--accent); background: var(--accent-soft); }
+.alts { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 5px; }
+.alt {
+  font-family: var(--mono); font-size: 11px; padding: 2px 7px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--ink-2);
+}
+.alt:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ------------------------------------------------------------------ pills */
+.pill {
+  display: inline-block; padding: 2px 8px; border-radius: 20px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .04em; white-space: nowrap;
+}
+.pill.high { background: var(--high-bg); color: var(--high); }
+.pill.med  { background: var(--med-bg);  color: var(--med); }
+.pill.low  { background: var(--low-bg);  color: var(--low); }
+.via { font-size: 11px; color: var(--ink-3); font-family: var(--mono); }
+
+/* ------------------------------------------------------- sidebar results */
+.fcard {
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-left: 3px solid var(--accent); border-radius: 8px;
+  padding: 9px 11px; margin-bottom: 8px;
+}
+.fcard .k {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--ink-3); font-weight: 700;
+}
+.fcard .v {
+  font-family: var(--mono); font-size: 14px; font-weight: 650;
+  word-break: break-all; margin: 3px 0 4px; display: flex; gap: 8px; align-items: flex-start;
+}
+.fcard .v span { flex: 1; }
+.copy {
+  border: 1px solid var(--line); background: var(--panel); border-radius: 6px;
+  padding: 1px 7px; font-size: 11px; color: var(--ink-3); flex: none;
+}
+.copy:hover { border-color: var(--accent); color: var(--accent); }
+.empty {
+  border: 1.5px dashed var(--line); border-radius: 9px; padding: 18px;
+  text-align: center; color: var(--ink-3); font-size: 13px;
+}
+
+/* --------------------------------------------------------------- settings */
+details { border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); margin-bottom: 8px; }
+details summary {
+  cursor: pointer; padding: 10px 12px; font-weight: 650; font-size: 13px;
+  list-style: none; display: flex; justify-content: space-between; align-items: center;
+}
+details summary::-webkit-details-marker { display: none; }
+details summary::after { content: "▾"; color: var(--ink-3); }
+details[open] summary::after { content: "▴"; }
+details .inner { padding: 4px 12px 14px; border-top: 1px solid var(--line); }
+label.row { display: block; margin: 11px 0 5px; font-size: 12px; font-weight: 650; color: var(--ink-2); }
+select, input[type=text] {
+  width: 100%; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 7px; padding: 7px 9px; font-size: 13px;
+}
+select:focus, input[type=text]:focus { outline: none; border-color: var(--accent); }
+.checks { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
+.checks label { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; }
+.hint { font-size: 11.5px; color: var(--ink-3); margin: 5px 0 0; line-height: 1.45; }
+
+/* ---------------------------------------------------------------- misc UI */
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.bar { height: 3px; background: var(--line); border-radius: 3px; overflow: hidden; margin-bottom: 18px; }
+.bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .25s; }
+.note { font-size: 12px; color: var(--med); margin-top: 8px; }
+.err {
+  background: var(--low-bg); color: var(--low); border-radius: 8px;
+  padding: 10px 12px; font-size: 13px; margin-bottom: 12px;
+}
+pre.ocr {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 12px; font-family: var(--mono); font-size: 11.5px; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 340px; overflow: auto;
+}
+.toast {
+  position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(80px);
+  background: var(--ink); color: var(--bg); padding: 9px 18px; border-radius: 20px;
+  font-size: 13px; font-weight: 600; opacity: 0; transition: .25s; pointer-events: none; z-index: 50;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.hidden { display: none !important; }
+
+/* ------------------------------------------------- document-kind switcher */
+.modes {
+  display: flex; gap: 6px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 11px; padding: 5px; margin-bottom: 20px;
+}
+.mode {
+  flex: 1; border: 0; background: transparent; color: var(--ink-2);
+  padding: 9px 12px; border-radius: 8px; font-weight: 650; font-size: 13.5px;
+  text-align: center; transition: .12s;
+}
+.mode:hover { color: var(--ink); }
+.mode.on { background: var(--accent); color: #fff; }
+.mode small { display: block; font-weight: 500; font-size: 11px; opacity: .8; }
+
+/* ------------------------------------------------------------ lab report */
+.flag {
+  display: inline-block; padding: 2px 9px; border-radius: 20px;
+  font-size: 10.5px; font-weight: 800; letter-spacing: .05em;
+}
+.flag.high   { background: var(--low-bg);  color: var(--low); }
+.flag.low    { background: var(--med-bg);  color: var(--med); }
+.flag.normal { background: var(--high-bg); color: var(--high); }
+.flag.check  { background: var(--check-bg); color: var(--check); }
+.flag.unknown{ background: rgba(130,150,180,.16); color: var(--ink-3); }
+.panel-row td {
+  background: var(--panel-2); font-size: 10.5px; font-weight: 800;
+  letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3);
+  padding: 7px 8px;
+}
+.meta-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px; margin-bottom: 14px;
+}
+.meta-item {
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 7px 10px;
+}
+.meta-item .k {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--ink-3); font-weight: 700;
+}
+.meta-item .v { font-size: 13px; font-weight: 650; margin-top: 2px; }
+.disclaimer {
+  background: var(--med-bg); border-left: 3px solid var(--med);
+  border-radius: 8px; padding: 10px 12px; font-size: 12px;
+  color: var(--ink-2); margin-bottom: 16px; line-height: 1.5;
+}
+.ref-borrowed { color: var(--med); font-size: 11px; }
+
+/* Anything Gemini read is tinted and labelled. It must never be mistaken for
+   a value the local OCR actually saw on the page. */
+.ai-badge {
+  display: inline-block; padding: 2px 7px; border-radius: 20px;
+  font-size: 10px; font-weight: 800; letter-spacing: .05em;
+  background: rgba(150, 90, 210, .16); color: #8b5cc7;
+}
+.ai-row td { background: rgba(150, 90, 210, .06); }
+.ai-row .val-input { border-color: rgba(150, 90, 210, .5); }
+.ai-panel {
+  border: 1px solid rgba(150, 90, 210, .35); border-radius: 10px;
+  padding: 12px 14px; margin-top: 14px; background: rgba(150, 90, 210, .05);
+}
+.ai-panel h4 { margin: 0 0 4px; font-size: 13px; }
+.ai-panel p { margin: 0 0 10px; font-size: 12px; color: var(--ink-2); line-height: 1.5; }
+.spin {
+  width: 15px; height: 15px; border: 2px solid var(--line); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin .7s linear infinite; display: inline-block; vertical-align: -3px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+
+<body>
+<div class="app">
+
+  <!-- ============================ SIDEBAR ============================ -->
+  <aside class="sidebar">
+    <div class="brand"><span class="dot"></span> UTR Extractor</div>
+
+    <div class="sec-title">Settings</div>
+    <details>
+      <summary>Engine &amp; fields</summary>
+      <div class="inner">
+        <label class="row" for="engine">OCR engine</label>
+        <select id="engine"></select>
+
+        <label class="row" for="accuracy">Accuracy</label>
+        <select id="accuracy"></select>
+        <p class="hint" id="accuracyHint"></p>
+
+        <label class="row" for="cleanup">Image cleanup</label>
+        <select id="cleanup">
+          <option value="auto">auto — upscale &amp; sharpen</option>
+          <option value="none">none — read as-is</option>
+          <option value="aggressive">aggressive — for faint screenshots</option>
+        </select>
+        <p class="hint">Try <b>aggressive</b> when a low-contrast screenshot reads badly.</p>
+
+        <div id="paymentSettings">
+          <label class="row">Fields to extract</label>
+          <div class="checks" id="fieldChecks"></div>
+        </div>
+      </div>
+    </details>
+
+    <details id="customSettings">
+      <summary>Custom field</summary>
+      <div class="inner">
+        <p class="hint">Pull out anything else. Keywords alone search by label, a
+          regex alone scans the whole image, both together does label first.</p>
+        <label class="row" for="cLabel">Label</label>
+        <input type="text" id="cLabel" placeholder="e.g. Cheque Number">
+        <label class="row" for="cKeys">Label keywords (comma separated)</label>
+        <input type="text" id="cKeys" placeholder="cheque no, chq no">
+        <label class="row" for="cPat">Value pattern (regex, optional)</label>
+        <input type="text" id="cPat" placeholder="\d{6}">
+      </div>
+    </details>
+
+    <div id="sideResults" class="hidden">
+      <div class="sec-title">Extracted values</div>
+      <select id="imgPick" class="hidden" style="margin-bottom:10px"></select>
+      <div id="fieldCards"></div>
+
+      <div class="sec-title">Download</div>
+      <select id="scope" class="hidden" style="margin-bottom:8px">
+        <option value="all">All images</option>
+        <option value="one">This image only</option>
+      </select>
+      <label class="checks" style="margin-bottom:10px">
+        <label><input type="checkbox" id="rawText"> Append full OCR text</label>
+      </label>
+      <div class="grid2">
+        <button class="btn" data-fmt="docx">Word</button>
+        <button class="btn" data-fmt="pdf">PDF</button>
+        <button class="btn" data-fmt="csv">CSV</button>
+        <button class="btn" data-fmt="json">JSON</button>
+      </div>
+      <button class="btn block" data-fmt="txt" style="margin-top:8px">Plain text</button>
+    </div>
+  </aside>
+
+  <!-- ============================== MAIN ============================== -->
+  <main class="main">
+    <h1 id="pageTitle">Document Extractor</h1>
+    <p class="lede" id="pageLede">
+      Upload an image — it reads the document, pulls out the details, and gives
+      you a file to download. Everything runs locally on your machine.
+    </p>
+
+    <div class="modes" id="modes"></div>
+
+    <div class="drop" id="drop">
+      <h3 id="dropTitle">Drop images here</h3>
+      <p>PDF, PNG, JPG, WEBP, BMP or TIFF — several at once is fine</p>
+      <button class="btn primary" id="pick">Choose files</button>
+      <button class="btn hidden" id="cancel">Stop</button>
+      <input type="file" id="file" multiple accept="image/*,application/pdf,.pdf" class="hidden">
+    </div>
+
+    <div class="bar hidden" id="bar"><i></i></div>
+    <div id="errors"></div>
+    <div id="results"></div>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------ state */
+const state = {
+  config: null,
+  docType: "payment",   // "payment" | "bloodtest" -- never mixed
+  results: [],          // one entry per successfully read image
+  selected: 0,
+  busy: false,
+  abort: null,      // AbortController while a batch is in flight
+};
+
+// Everything that differs between the two document kinds, in one place.
+const KIND = {
+  payment: {
+    title: "UTR / Payment Detail Extractor",
+    lede: "Upload a payment screenshot or receipt — it reads the image, pulls " +
+          "out the UTR and other details, and gives you a document to download.",
+    drop: "Drop payment screenshots here",
+    extract: "/api/extract",
+    export: "/api/export",
+  },
+  bloodtest: {
+    title: "Blood Test Report Extractor",
+    lede: "Upload a lab report — it reads the patient details and every test " +
+          "row with its reference range, and gives you a document to download.",
+    drop: "Drop blood test reports here",
+    extract: "/api/bloodtest/extract",
+    export: "/api/bloodtest/export",
+  },
+};
+const kind = () => KIND[state.docType];
+
+const $  = (sel) => document.querySelector(sel);
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+};
+
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.remove("show"), 1900);
+}
+
+/* Confidence -> pill class + word. Kept identical to the Python side. */
+function grade(conf) {
+  if (conf >= 0.8) return ["high", "HIGH"];
+  if (conf >= 0.6) return ["med", "MEDIUM"];
+  return ["low", "LOW"];
+}
+const pct = (n) => Math.round(n * 100) + "%";
+
+// One place for "does this lab flag deserve the reader's attention" -- used
+// everywhere a count or a filter needs to agree with what the flag pill
+// itself shows, so a "check" (likely-misread) result never quietly falls
+// through a filter written before that flag existed.
+const FLAG_LABEL = { high: "HIGH", low: "LOW", normal: "Normal",
+                     check: "CHECK", unknown: "—" };
+const needsAttention = (t) => t.flag === "high" || t.flag === "low" || t.flag === "check";
+
+/* ----------------------------------------------------------------- config */
+async function loadConfig() {
+  const res = await fetch("/api/config");
+  state.config = await res.json();
+
+  const deployment = state.config.deployment || {};
+  if (deployment.public && deployment.notice) {
+    $("#pageLede").textContent = deployment.notice;
+  }
+
+  const engine = $("#engine");
+  engine.innerHTML = "";
+  ["auto", ...state.config.engines].forEach((e) => {
+    const o = el("option", null, e === "auto" ? "auto — best available" : e);
+    o.value = e;
+    engine.appendChild(o);
+  });
+
+  state.ai = state.config.ai || { available: false };
+
+  const acc = $("#accuracy"), accHint = $("#accuracyHint");
+  acc.innerHTML = "";
+  (state.config.accuracy_modes || []).forEach((m) => {
+    const o = el("option", null, m.label);
+    o.value = m.key;
+    o.dataset.hint = m.hint;
+    acc.appendChild(o);
+  });
+  acc.value = "auto";
+  const showHint = () => {
+    accHint.textContent = acc.selectedOptions[0]?.dataset.hint || "";
+  };
+  acc.addEventListener("change", showHint);
+  showHint();
+
+  if (!state.config.engines.length) {
+    showError(
+      "No OCR engine is installed on the server. Install one with: " +
+      "pip install rapidocr-onnxruntime"
+    );
+  }
+
+  // Document-kind switcher. Switching clears results on purpose: a payment
+  // receipt and a lab report have nothing in common, and showing leftovers from
+  // one under the heading of the other would be actively misleading.
+  const modes = $("#modes");
+  modes.innerHTML = "";
+  (state.config.doc_types || []).forEach((d) => {
+    const b = el("button", "mode" + (d.key === state.docType ? " on" : ""));
+    b.appendChild(document.createTextNode(d.label));
+    b.appendChild(el("small", null, d.hint));
+    b.addEventListener("click", () => setDocType(d.key));
+    modes.appendChild(b);
+  });
+  applyDocType();
+
+  const box = $("#fieldChecks");
+  box.innerHTML = "";
+  state.config.fields.forEach((f) => {
+    const lab = el("label");
+    const cb = el("input");
+    cb.type = "checkbox";
+    cb.value = f.key;
+    cb.checked = state.config.default_enabled.includes(f.key);
+    lab.appendChild(cb);
+    lab.appendChild(el("span", null, f.label));
+    box.appendChild(lab);
+  });
+}
+
+const chosenFields = () =>
+  [...document.querySelectorAll("#fieldChecks input:checked")].map((c) => c.value);
+
+function setDocType(key) {
+  if (key === state.docType || state.busy) return;
+  state.docType = key;
+  state.results = [];
+  state.selected = 0;
+  $("#results").innerHTML = "";
+  $("#errors").innerHTML = "";
+  document.querySelectorAll(".mode").forEach((b, i) =>
+    b.classList.toggle("on", state.config.doc_types[i].key === key));
+  applyDocType();
+  renderSidebar();
+}
+
+function applyDocType() {
+  const k = kind();
+  $("#pageTitle").textContent = k.title;
+  $("#pageLede").textContent = k.lede;
+  $("#dropTitle").textContent = k.drop;
+
+  // Field pickers and the custom-field builder are payment-only concepts.
+  const paymentOnly = state.docType !== "payment";
+  $("#paymentSettings").classList.toggle("hidden", paymentOnly);
+  $("#customSettings").classList.toggle("hidden", paymentOnly);
+
+  const cfg = (state.config.doc_types || []).find((d) => d.key === state.docType);
+  if (cfg?.default_accuracy) $("#accuracy").value = cfg.default_accuracy;
+}
+
+/* ---------------------------------------------------------------- extract */
+async function handleFiles(files) {
+  const list = [...files].filter((f) =>
+    f.type.startsWith("image/") || f.type === "application/pdf" ||
+    /\.pdf$/i.test(f.name));
+  if (!list.length) { toast("No images or PDFs in that drop"); return; }
+  if (state.busy) return;
+
+  const fields = chosenFields();
+  if (state.docType === "payment" && !fields.length) {
+    toast("Pick at least one field in Settings"); return;
+  }
+
+  state.busy = true;
+  state.abort = new AbortController();
+  state.results = [];
+  $("#errors").innerHTML = "";
+  $("#cancel").classList.remove("hidden");
+  $("#bar").classList.remove("hidden");
+
+  // Uploaded in small groups rather than one giant request. A 40-image batch
+  // sent whole is one connection held for minutes: no partial results, nothing
+  // to cancel, and a browser timeout loses the lot. In chunks, each group's
+  // results appear as they land and stopping keeps what already arrived.
+  const CHUNK = 4;
+  let done = 0;
+
+  try {
+    for (let start = 0; start < list.length; start += CHUNK) {
+      const group = list.slice(start, start + CHUNK);
+      $("#results").innerHTML = state.results.length
+        ? $("#results").innerHTML
+        : `<p class="muted"><span class="spin"></span> Reading ${list.length} file` +
+          `${list.length > 1 ? "s" : ""}… the first one loads the OCR model, so it is the slow one.</p>`;
+
+      const body = new FormData();
+      group.forEach((f) => body.append("images", f, f.name));
+      body.append("engine", $("#engine").value);
+      body.append("preprocess", $("#cleanup").value);
+      body.append("accuracy", $("#accuracy").value);
+      if (state.docType === "payment") {
+        body.append("fields", fields.join(","));
+        body.append("custom_label", $("#cLabel").value);
+        body.append("custom_keywords", $("#cKeys").value);
+        body.append("custom_pattern", $("#cPat").value);
+      }
+
+      const res = await fetch(kind().extract,
+        { method: "POST", body, signal: state.abort.signal });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `Server returned ${res.status}`);
+      }
+      const data = await res.json();
+      state.labDisclaimer = data.disclaimer || state.labDisclaimer || "";
+      absorb(data.results, group);
+
+      done += group.length;
+      $("#bar").firstElementChild.style.width =
+        Math.round((done / list.length) * 100) + "%";
+      render();                       // show this group before fetching the next
+    }
+  } catch (err) {
+    if (err.name === "AbortError") {
+      toast(`Stopped — kept ${state.results.length} of ${list.length}`);
+      render();
+    } else {
+      if (!state.results.length) $("#results").innerHTML = "";
+      showError(err.message);
+    }
+  } finally {
+    state.busy = false;
+    state.abort = null;
+    $("#cancel").classList.add("hidden");
+    setTimeout(() => {
+      $("#bar").classList.add("hidden");
+      $("#bar").firstElementChild.style.width = "0";
+    }, 400);
+  }
+}
+
+// Turn one chunk's server response into displayable records.
+function absorb(results, sourceFiles) {
+  (results || []).forEach((r) => {
+    // Hold on to the original File so the AI fallback can resend just it.
+    r.file = (sourceFiles || []).find((f) => f.name === r.filename) || null;
+      if (r.error) {
+        showError(`${r.filename} — ${r.error}`);
+        return;
+      }
+      if (state.docType === "bloodtest") {
+        // Lab rows arrive ready to show; keep the original so edits are visible.
+        r.tests = (r.rows || []).map((t) => ({ ...t, original: t.value }));
+        state.results.push(r);
+        return;
+      }
+      // Flatten to one editable row per field, keeping alternates alongside.
+      r.rows = r.fields.map((f) => ({
+        key: f.key,
+        label: f.label,
+        value: f.matches[0].value,
+        original: f.matches[0].value,
+        confidence: f.matches[0].confidence,
+        method: f.matches[0].method,
+        note: f.matches[0].note,
+        alts: f.matches.slice(1),
+      }));
+      state.results.push(r);
+    });
+  state.selected = Math.min(state.selected, Math.max(0, state.results.length - 1));
+}
+
+function showError(msg) {
+  $("#errors").appendChild(el("div", "err", msg));
+}
+
+/* ------------------------------------------------------------------ render */
+function render() {
+  renderMain();
+  renderSidebar();
+}
+
+function renderMain() {
+  const root = $("#results");
+  root.innerHTML = "";
+  if (!state.results.length) return;
+  if (state.docType === "bloodtest") return renderLabMain(root);
+
+  /* --- metrics ------------------------------------------------------- */
+  const totalValues = state.results.reduce((n, r) => n + r.rows.length, 0);
+  const withUtr = state.results.filter((r) =>
+    r.rows.some((x) => x.key === "utr" && x.value.trim())).length;
+  const avg = state.results.reduce((n, r) => n + r.ocr_confidence, 0) / state.results.length;
+
+  const metrics = el("div", "metrics");
+  [["Images", state.results.length],
+   ["UTR found", `${withUtr} / ${state.results.length}`],
+   ["Values extracted", totalValues],
+   ["Avg OCR confidence", pct(avg)]].forEach(([k, v]) => {
+    const m = el("div", "metric");
+    m.appendChild(el("div", "k", k));
+    m.appendChild(el("div", "v", String(v)));
+    metrics.appendChild(m);
+  });
+  root.appendChild(metrics);
+
+  /* --- batch summary ------------------------------------------------- */
+  if (state.results.length > 1) {
+    const card = el("div", "card");
+    const head = el("div", "card-head");
+    head.appendChild(el("div", "name", "Batch summary"));
+    card.appendChild(head);
+
+    const body = el("div", "card-body");
+    const table = el("table");
+    const cols = ["File", "UTR / Reference", "Amount", "Date", "Paid To", "Status", "OCR"];
+    const thead = el("thead"), hr = el("tr");
+    cols.forEach((c) => hr.appendChild(el("th", null, c)));
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    const tbody = el("tbody");
+    state.results.forEach((r) => {
+      const get = (k) => (r.rows.find((x) => x.key === k) || {}).value || "—";
+      const tr = el("tr");
+      [r.filename, get("utr"), get("amount"), get("date"),
+       get("payee"), get("status"), pct(r.ocr_confidence)]
+        .forEach((v) => tr.appendChild(el("td", null, v)));
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    body.appendChild(table);
+    card.appendChild(body);
+    root.appendChild(card);
+  }
+
+  /* --- one card per image -------------------------------------------- */
+  state.results.forEach((r, idx) => root.appendChild(imageCard(r, idx)));
+}
+
+// Explains, in one short clause, why a read cost what it cost -- the point of
+// "auto" is that a person should not have to guess what happened. The reason
+// given is the one that actually decided the tier -- the read coming back
+// thin -- with the blur/resolution reading added only as likely colour on
+// top of that, never as the reason by itself.
+const ACC_WORDS = { fast: "read fast", balanced: "read four ways", high: "read six ways" };
+function qualityClause(r) {
+  if (!r.accuracy_used || !r.escalated) return "";
+  const base = ACC_WORDS[r.accuracy_used] || `read (${r.accuracy_used})`;
+  const why = r.quality?.tier === "poor" ? "looked blurry"
+    : r.quality?.tier === "soft" ? "looked a little soft"
+    : "came back thin at first";
+  return `image ${why}, so it was ${base}`;
+}
+
+function imageCard(r, idx) {
+  const card = el("div", "card");
+
+  const head = el("div", "card-head");
+  head.appendChild(el("div", "name", r.filename));
+  head.appendChild(el("div", "muted",
+    `${r.engine} · OCR ${pct(r.ocr_confidence)} · ${r.elapsed.toFixed(2)}s` +
+    (qualityClause(r) ? ` · ${qualityClause(r)}` : "")));
+  card.appendChild(head);
+
+  const body = el("div", "card-body");
+  const split = el("div", "split");
+
+  /* left: the screenshot */
+  const leftCol = el("div");
+  if (r.thumbnail) {
+    const img = el("img", "shot");
+    img.src = r.thumbnail;
+    img.alt = r.filename;
+    leftCol.appendChild(img);
+  }
+  if (r.utr_kind) {
+    leftCol.appendChild(el("p", "muted", `UTR format: ${r.utr_kind}`));
+  }
+  split.appendChild(leftCol);
+
+  /* right: the editable field table */
+  const rightCol = el("div");
+  if (!r.rows.length) {
+    rightCol.appendChild(el("div", "empty",
+      "Nothing matched. Try aggressive cleanup, or check the full OCR text below."));
+  } else {
+    const table = el("table");
+    const thead = el("thead"), hr = el("tr");
+    ["Field", "Value", "Confidence", "Via"].forEach((c) => hr.appendChild(el("th", null, c)));
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    const tbody = el("tbody");
+    r.rows.forEach((row) => tbody.appendChild(fieldRow(r, row, idx)));
+    table.appendChild(tbody);
+    rightCol.appendChild(table);
+
+    const notes = r.rows.filter((x) => x.note);
+    notes.forEach((x) => rightCol.appendChild(el("p", "note", `⚠ ${x.label}: ${x.note}`)));
+  }
+  split.appendChild(rightCol);
+  body.appendChild(split);
+
+  /* full OCR text */
+  body.appendChild(aiPanel(r));
+
+  const det = el("details");
+  det.appendChild(el("summary", null, "Full OCR text"));
+  const inner = el("div", "inner");
+  const pre = el("pre", "ocr", r.full_text || "(no text recovered)");
+  inner.appendChild(pre);
+  det.appendChild(inner);
+  body.appendChild(det);
+
+  card.appendChild(body);
+  return card;
+}
+
+function fieldRow(record, row, idx) {
+  const tr = el("tr", row.ai ? "ai-row" : null);
+  const labelTd = el("td", "f-label", row.label);
+  if (row.ai) labelTd.appendChild(el("span", "ai-badge", " AI"));
+  tr.appendChild(labelTd);
+
+  /* value cell: editable, plus any alternate candidates */
+  const valTd = el("td");
+  const input = el("input", "val-input");
+  input.type = "text";
+  input.value = row.value;
+  input.addEventListener("input", () => {
+    row.value = input.value;
+    const edited = row.value !== row.original;
+    input.classList.toggle("edited", edited);
+    if (edited) { row.method = "manual"; row.confidence = 1; }
+    renderSidebar();
+    // Keep the summary table honest as values change.
+    if (state.results.length > 1) renderMain();
+  });
+  valTd.appendChild(input);
+
+  // Two different kinds of candidate, kept visually apart because they mean
+  // different things: "also read" is text the engine genuinely saw somewhere,
+  // "could also be" is the same reading with an ambiguous glyph swapped.
+  const groups = [
+    ["also read:", row.alts.filter((a) => a.method !== "look-alike")],
+    ["could also be:", row.alts.filter((a) => a.method === "look-alike")],
+  ];
+  groups.forEach(([caption, list]) => {
+    if (!list.length) return;
+    const alts = el("div", "alts");
+    alts.appendChild(el("span", "muted", caption));
+    list.forEach((a) => {
+      const b = el("button", "alt", a.value);
+      b.title = a.method === "look-alike"
+        ? "One look-alike glyph swapped (0/O, 1/l) — click if this is the real ID"
+        : `${pct(a.confidence)} via ${a.method} — click to use this instead`;
+      b.addEventListener("click", () => {
+        row.value = a.value;
+        row.confidence = a.confidence;
+        row.method = a.method;
+        render();
+      });
+      alts.appendChild(b);
+    });
+    valTd.appendChild(alts);
+  });
+  tr.appendChild(valTd);
+
+  const [cls, word] = grade(row.confidence);
+  const cTd = el("td");
+  const pill = el("span", "pill " + cls, `${word} ${pct(row.confidence)}`);
+  cTd.appendChild(pill);
+  tr.appendChild(cTd);
+
+  tr.appendChild(el("td", "via", row.method));
+  return tr;
+}
+
+/* ------------------------------------------------------ lab report render */
+
+function renderLabMain(root) {
+  const totalTests = state.results.reduce((n, r) => n + r.tests.length, 0);
+  const flagged = state.results.reduce(
+    (n, r) => n + r.tests.filter(needsAttention).length, 0);
+  const avg = state.results.reduce((n, r) => n + r.ocr_confidence, 0) / state.results.length;
+
+  const metrics = el("div", "metrics");
+  [["Reports", state.results.length],
+   ["Tests read", totalTests],
+   ["Outside range", flagged],
+   ["Avg OCR confidence", pct(avg)]].forEach(([k, v]) => {
+    const m = el("div", "metric");
+    m.appendChild(el("div", "k", k));
+    m.appendChild(el("div", "v", String(v)));
+    metrics.appendChild(m);
+  });
+  root.appendChild(metrics);
+
+  if (state.labDisclaimer) {
+    root.appendChild(el("div", "disclaimer", state.labDisclaimer));
+  }
+
+  state.results.forEach((r) => root.appendChild(labCard(r)));
+}
+
+function labCard(r) {
+  const card = el("div", "card");
+
+  const head = el("div", "card-head");
+  head.appendChild(el("div", "name", r.filename));
+  head.appendChild(el("div", "muted",
+    `${r.engine} · OCR ${pct(r.ocr_confidence)} · ${r.elapsed.toFixed(2)}s` +
+    (qualityClause(r) ? ` · ${qualityClause(r)}` : "")));
+  card.appendChild(head);
+
+  const body = el("div", "card-body");
+
+  if (r.meta?.length) {
+    const grid = el("div", "meta-grid");
+    r.meta.forEach((m) => {
+      const item = el("div", "meta-item");
+      item.appendChild(el("div", "k", m.label));
+      item.appendChild(el("div", "v", m.value));
+      grid.appendChild(item);
+    });
+    body.appendChild(grid);
+  }
+
+  if (!r.tests.length) {
+    body.appendChild(el("div", "empty",
+      "No test rows were recognised. Try Maximum accuracy, or check the full OCR text."));
+  } else {
+    const table = el("table");
+    const thead = el("thead"), hr = el("tr");
+    ["Test", "Result", "Unit", "Reference", "Flag"].forEach((c) =>
+      hr.appendChild(el("th", null, c)));
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    const tbody = el("tbody");
+    let panel = null;
+    r.tests.forEach((t) => {
+      if (t.panel !== panel) {         // group rows under their panel heading
+        panel = t.panel;
+        const pr = el("tr", "panel-row");
+        const td = el("td", null, panel);
+        td.colSpan = 5;
+        pr.appendChild(td);
+        tbody.appendChild(pr);
+      }
+      tbody.appendChild(labRow(t));
+    });
+    table.appendChild(tbody);
+    body.appendChild(table);
+
+    const borrowed = r.tests.filter((t) => t.ref_source === "builtin");
+    if (borrowed.length) {
+      body.appendChild(el("p", "note",
+        `⚠ ${borrowed.length} test(s) had no reference range printed on the ` +
+        `report, so a typical adult range was used instead: ` +
+        `${borrowed.map((t) => t.name).join(", ")}.`));
+    }
+  }
+
+  body.appendChild(aiPanel(r));
+
+  const det = el("details");
+  det.appendChild(el("summary", null, "Full OCR text"));
+  const inner = el("div", "inner");
+  inner.appendChild(el("pre", "ocr", r.full_text || "(no text recovered)"));
+  det.appendChild(inner);
+  body.appendChild(det);
+
+  card.appendChild(body);
+  return card;
+}
+
+// Offered per image, never run automatically: this is the one action that
+// sends the page off the machine, so it stays an explicit choice.
+function aiPanel(r) {
+  const panel = el("div", "ai-panel");
+  panel.appendChild(el("h4", null, "Not finding everything?"));
+
+  if (!state.ai?.available) {
+    panel.appendChild(el("p", null,
+      "Reading with Gemini is not set up. Add a key to .env to enable it - "
+      + "see the README."));
+    return panel;
+  }
+
+  panel.appendChild(el("p", null,
+    "Send just this image to Google's Gemini and add whatever it reads. "
+    + "Its values are tinted and labelled AI, are never judged as high or low "
+    + "by the model, and always need checking against the image."));
+
+  const btn = el("button", "btn", "Try reading this with AI");
+  btn.addEventListener("click", () => runAi(r, btn));
+  panel.appendChild(btn);
+  return panel;
+}
+
+async function runAi(record, btn) {
+  if (!record.file) { toast("Re-upload this image to use AI reading"); return; }
+  btn.disabled = true;
+  btn.textContent = "Reading with Gemini...";
+  try {
+    const body = new FormData();
+    body.append("images", record.file, record.filename);
+    const url = state.docType === "bloodtest" ? "/api/ai/bloodtest" : "/api/ai/extract";
+    const res = await fetch(url, { method: "POST", body });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Server returned ${res.status}`);
+    }
+    const data = await res.json();
+
+    if (state.docType === "bloodtest") {
+      const existing = new Set(record.tests.map((t) => t.name.toLowerCase()));
+      const added = (data.rows || []).filter((t) => !existing.has(t.name.toLowerCase()));
+      added.forEach((t) => record.tests.push({ ...t, original: t.value, ai: true }));
+      toast(added.length ? `Gemini added ${added.length} row(s)` : "Gemini found nothing new");
+    } else {
+      const existing = new Set(record.rows.map((x) => x.key));
+      const added = (data.rows || []).filter((x) => !existing.has(x.key));
+      added.forEach((x) => record.rows.push({ ...x, original: x.value, alts: [], ai: true }));
+      toast(added.length ? `Gemini added ${added.length} field(s)` : "Gemini found nothing new");
+    }
+    render();
+  } catch (err) {
+    showError("AI reading failed - " + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Try reading this with AI";
+  }
+}
+
+function labRow(t) {
+  const tr = el("tr", t.ai ? "ai-row" : null);
+  const nameTd = el("td", "f-label", t.name);
+  if (t.ai) nameTd.appendChild(el("span", "ai-badge", " AI"));
+  // Why a row has no verdict matters as much as the number, so the reason is
+  // printed with the test rather than tucked away in the export.
+  if (t.note) nameTd.appendChild(el("div", "ref-borrowed", t.note));
+  tr.appendChild(nameTd);
+
+  const valTd = el("td");
+  const input = el("input", "val-input");
+  input.type = "text";
+  input.value = t.value;
+  input.addEventListener("input", () => {
+    t.value = input.value;
+    input.classList.toggle("edited", t.value !== t.original);
+    // A hand-edited result is no longer something we compared to the range,
+    // so the flag is cleared rather than left showing a stale verdict.
+    if (t.value !== t.original) t.flag = "unknown";
+    renderSidebar();
+  });
+  valTd.appendChild(input);
+  tr.appendChild(valTd);
+
+  tr.appendChild(el("td", "via", t.unit || "—"));
+
+  const refTd = el("td", "via", t.ref_text || "—");
+  if (t.ref_source === "builtin") {
+    refTd.appendChild(el("div", "ref-borrowed", "not printed on report"));
+  }
+  tr.appendChild(refTd);
+
+  const flagTd = el("td");
+  flagTd.appendChild(el("span", "flag " + t.flag, FLAG_LABEL[t.flag] || "—"));
+  tr.appendChild(flagTd);
+  return tr;
+}
+
+function renderSidebar() {
+  if (state.docType === "bloodtest") return renderLabSidebar();
+  const wrap = $("#sideResults");
+  if (!state.results.length) { wrap.classList.add("hidden"); return; }
+  wrap.classList.remove("hidden");
+
+  /* image picker, only when there is a choice to make */
+  const pick = $("#imgPick"), scope = $("#scope");
+  if (state.results.length > 1) {
+    pick.classList.remove("hidden");
+    scope.classList.remove("hidden");
+    if (pick.options.length !== state.results.length) {
+      pick.innerHTML = "";
+      state.results.forEach((r, i) => {
+        const o = el("option", null, r.filename);
+        o.value = String(i);
+        pick.appendChild(o);
+      });
+    }
+    pick.value = String(state.selected);
+  } else {
+    pick.classList.add("hidden");
+    scope.classList.add("hidden");
+  }
+
+  const rec = state.results[state.selected];
+  const box = $("#fieldCards");
+  box.innerHTML = "";
+
+  if (!rec.rows.length) {
+    box.appendChild(el("div", "empty", "No fields matched for this image."));
+    return;
+  }
+
+  rec.rows.forEach((row) => {
+    if (!row.value.trim()) return;
+    const c = el("div", "fcard");
+    c.appendChild(el("div", "k", row.label));
+
+    const v = el("div", "v");
+    v.appendChild(el("span", null, row.value));
+    const copy = el("button", "copy", "copy");
+    copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(row.value); toast("Copied " + row.label); }
+      catch { toast("Copy blocked by the browser"); }
+    });
+    v.appendChild(copy);
+    c.appendChild(v);
+
+    const [cls, word] = grade(row.confidence);
+    const meta = el("div");
+    const pill = el("span", "pill " + cls, word);
+    meta.appendChild(pill);
+    meta.appendChild(el("span", "via", ` ${pct(row.confidence)} · via ${row.method}`));
+    c.appendChild(meta);
+    box.appendChild(c);
+  });
+}
+
+function renderLabSidebar() {
+  const wrap = $("#sideResults");
+  if (!state.results.length) { wrap.classList.add("hidden"); return; }
+  wrap.classList.remove("hidden");
+
+  const pick = $("#imgPick"), scope = $("#scope");
+  if (state.results.length > 1) {
+    pick.classList.remove("hidden");
+    scope.classList.remove("hidden");
+    if (pick.options.length !== state.results.length) {
+      pick.innerHTML = "";
+      state.results.forEach((r, i) => {
+        const o = el("option", null, r.filename);
+        o.value = String(i);
+        pick.appendChild(o);
+      });
+    }
+    pick.value = String(state.selected);
+  } else {
+    pick.classList.add("hidden");
+    scope.classList.add("hidden");
+  }
+
+  const rec = state.results[state.selected];
+  const box = $("#fieldCards");
+  box.innerHTML = "";
+
+  const patient = (rec.meta || []).find((m) => m.key === "patient_name");
+  if (patient) {
+    const c = el("div", "fcard");
+    c.appendChild(el("div", "k", "Patient"));
+    c.appendChild(el("div", "v")).appendChild(el("span", null, patient.value));
+    box.appendChild(c);
+  }
+
+  const flagged = rec.tests.filter(needsAttention);
+  const summary = el("div", "fcard");
+  summary.appendChild(el("div", "k", "Outside reference range"));
+  const v = el("div", "v");
+  v.appendChild(el("span", null, `${flagged.length} of ${rec.tests.length}`));
+  summary.appendChild(v);
+  box.appendChild(summary);
+
+  if (!flagged.length) {
+    box.appendChild(el("div", "empty",
+      "Every value read sits inside its printed range."));
+  }
+  flagged.forEach((t) => {
+    const c = el("div", "fcard");
+    c.appendChild(el("div", "k", t.name));
+    const line = el("div", "v");
+    line.appendChild(el("span", null, `${t.value} ${t.unit}`.trim()));
+    c.appendChild(line);
+    const meta = el("div");
+    meta.appendChild(el("span", "flag " + t.flag, FLAG_LABEL[t.flag] || t.flag));
+    meta.appendChild(el("span", "via", ` ref ${t.ref_text || "—"}`));
+    c.appendChild(meta);
+    // "check" is the one flag that comes with an explanation worth reading
+    // right in the sidebar -- not just a colour, since the reason a value
+    // looks implausible is exactly what the user needs before trusting it.
+    if (t.flag === "check" && t.note) {
+      c.appendChild(el("div", "ref-borrowed", t.note));
+    }
+    box.appendChild(c);
+  });
+}
+
+/* ----------------------------------------------------------------- export */
+async function downloadLab(fmt) {
+  const only = state.results.length > 1 && $("#scope").value === "one";
+  const chosen = only ? [state.results[state.selected]] : state.results;
+
+  return {
+    format: fmt,
+    include_raw_text: $("#rawText").checked,
+    reports: chosen.map((r) => ({
+      filename: r.filename, engine: r.engine,
+      ocr_confidence: r.ocr_confidence, elapsed: r.elapsed,
+      full_text: r.full_text,
+      meta: Object.fromEntries((r.meta || []).map((m) => [m.key, m.value])),
+      rows: r.tests.filter((t) => String(t.value).trim()).map((t) => ({
+        key: t.key, name: t.name, panel: t.panel, value: t.value,
+        unit: t.unit, ref_text: t.ref_text, ref_source: t.ref_source,
+        flag: t.flag,
+        note: t.value !== t.original ? "Corrected by hand" : t.note,
+      })),
+    })),
+  };
+}
+
+async function download(fmt) {
+  if (!state.results.length) return;
+
+  if (state.docType === "bloodtest") {
+    return send(kind().export, await downloadLab(fmt), fmt);
+  }
+
+  const only = state.results.length > 1 && $("#scope").value === "one";
+  const chosen = only ? [state.results[state.selected]] : state.results;
+
+  const payload = {
+    format: fmt,
+    include_raw_text: $("#rawText").checked,
+    records: chosen.map((r) => ({
+      filename: r.filename,
+      engine: r.engine,
+      ocr_confidence: r.ocr_confidence,
+      elapsed: r.elapsed,
+      full_text: r.full_text,
+      fields: r.rows
+        .filter((x) => x.value.trim())
+        .map((x) => ({
+          key: x.key, label: x.label, value: x.value,
+          confidence: x.confidence, method: x.method,
+          note: x.value !== x.original ? "Corrected by hand" : x.note,
+        })),
+    })),
+  };
+
+  return send(kind().export, payload, fmt);
+}
+
+// Shared for both document kinds: post the payload, save whatever comes back.
+async function send(url, payload, fmt) {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Server returned ${res.status}`);
+    }
+
+    const blob = await res.blob();
+    const disp = res.headers.get("Content-Disposition") || "";
+    const guess = /filename="([^"]+)"/.exec(disp);
+    const url = URL.createObjectURL(blob);
+    const a = el("a");
+    a.href = url;
+    a.download = guess ? guess[1] : `utr_extract.${fmt}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast(fmt.toUpperCase() + " downloaded");
+  } catch (err) {
+    showError("Export failed — " + err.message);
+  }
+}
+
+/* ------------------------------------------------------------------ wiring */
+const drop = $("#drop");
+["dragenter", "dragover"].forEach((ev) =>
+  drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach((ev) =>
+  drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", (e) => handleFiles(e.dataTransfer.files));
+
+$("#pick").addEventListener("click", () => $("#file").click());
+$("#cancel").addEventListener("click", () => state.abort?.abort());
+$("#file").addEventListener("change", (e) => { handleFiles(e.target.files); e.target.value = ""; });
+
+$("#imgPick").addEventListener("change", (e) => {
+  state.selected = Number(e.target.value);
+  renderSidebar();
+});
+
+document.querySelectorAll("[data-fmt]").forEach((b) =>
+  b.addEventListener("click", () => download(b.dataset.fmt)));
+
+// Paste a screenshot straight from the clipboard.
+document.addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (files.length) handleFiles(files);
+});
+
+loadConfig().catch((err) => showError("Could not reach the server — " + err.message));
+</script>
+</body>
+</html>
