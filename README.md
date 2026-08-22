@@ -375,6 +375,14 @@ A few things worth knowing:
   browser automatically, since a person who just double-clicked an exe should
   not have to know a port number.
 
+## Running it as a public website instead
+
+The exe above runs entirely on one person's PC and never touches a network.
+Putting this behind a real URL that anyone can open is a different trade-off
+-- uploaded documents leave the visitor's device to get processed -- so it's
+covered separately in [DEPLOY.md](DEPLOY.md), including what changes to make
+that honest in the interface itself, and how to actually host it.
+
 ## Notes
 
 **Auto accuracy.** The default `Auto` setting reads every image at its normal
