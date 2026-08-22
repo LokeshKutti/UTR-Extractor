@@ -150,6 +150,47 @@ Open the Vercel URL and check:
   or the URL there doesn't exactly match what's in the address bar.
 - The download buttons work.
 
+### Known issue: memory crashes on Render's free tier
+
+Deployed and working as of the steps above, but with an unresolved
+reliability problem: the backend can crash under a real OCR request with
+"Ran out of memory (used over 512MB)" -- Render's free-tier RAM ceiling.
+It auto-restarts each time, so the site recovers on its own, just
+unpredictably.
+
+**What was tried, in order, all confirmed via direct testing (not guessed):**
+
+1. `build_variants()` built every prepared image copy (up to 7) before OCR
+   touched even the first one, so all were in memory at once for no reason.
+   Converted to a generator -- real improvement, verified locally, but the
+   crash persisted on Render.
+2. Added `MAX_ACCURACY_TIER` to force the deployment onto the lightest
+   "balanced" tier (4 copies) regardless of what a client requests. Still
+   crashed.
+3. Capped further to "fast" (1-2 copies, no upscaling) -- the smallest
+   footprint the app can produce short of not running OCR at all. **Still
+   crashed**, which rules out variant count as the cause.
+4. Measured actual memory locally: even "fast" tier peaks around 375-430MB
+   for a single request, mostly from RapidOCR/onnxruntime/opencv's own
+   model-loading and inference overhead rather than this app's own code.
+   That's uncomfortably close to 512MB before any Linux-container overhead
+   Render itself adds is even counted.
+5. Tried limiting numerical library thread pools (`OMP_NUM_THREADS=1` and
+   similar), a standard mitigation for exactly this class of problem.
+   Measured directly: no reduction in peak memory.
+
+**Not yet tried**: forcing glibc to release freed memory back to the OS
+(`malloc_trim`) -- a Linux-specific technique that can't be verified on a
+Windows dev machine, so it wasn't attempted; genuinely unknown whether it
+would help.
+
+**Realistic paths forward, in order of confidence:**
+- Upgrade Render's plan (more RAM) -- confirmed to be the actual
+  bottleneck, so this is the direct fix.
+- Try the `malloc_trim` approach above -- cheap to attempt, unverified.
+- A different free host with a higher RAM ceiling than 512MB, if one
+  exists -- not investigated.
+
 ---
 
 ## Option B: a single Docker image
