@@ -6,19 +6,26 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-# requirements.txt asks for opencv-python-headless, but rapidocr-onnxruntime
-# itself declares a hard dependency on plain opencv-python (confirmed via
-# `pip show rapidocr-onnxruntime`) -- pip installs both, and the GUI-linked
-# one is what actually resolves at import time. Rather than fight pip's
-# resolver over which cv2 wins, this just satisfies the shared libraries the
-# full build needs, none of which require an actual display.
+# Belt-and-suspenders alongside the --no-deps install below: rapidocr's own
+# opencv-python dependency needs these even though it's no longer installed
+# on purpose, kept here in case a future change to requirements.txt or a
+# rapidocr version bump reintroduces it.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libglib2.0-0 libgl1 libsm6 libxext6 libxrender1 libxcb1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# rapidocr-onnxruntime declares a hard dependency on plain opencv-python
+# (confirmed via `pip show rapidocr-onnxruntime`), which needs the libraries
+# above -- but requirements.txt deliberately asks for opencv-python-headless
+# instead, which doesn't. --no-deps stops pip from pulling in the GUI-linked
+# build at all, so the headless one (installed normally, right after) is the
+# only cv2 that ends up on disk. See the comment at the top of
+# requirements.txt for the full explanation; render.yaml's buildCommand does
+# the same two steps for the Docker-free deployment path.
+RUN pip install --no-cache-dir --no-deps rapidocr-onnxruntime==1.2.3 \
+    && pip install --no-cache-dir -r requirements.txt
 
 COPY core.py medical.py server.py ai_assist.py ./
 COPY web ./web

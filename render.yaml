@@ -1,0 +1,25 @@
+# Render Blueprint for the backend API -- no Docker. Render's native Python
+# runtime builds this straight from requirements.txt plus the build/start
+# commands below; see DEPLOY.md for why the build command is two pip calls
+# instead of one, and for the matching Vercel setup for the frontend.
+services:
+  - type: web
+    name: utr-extractor-api
+    runtime: python
+    plan: free
+    buildCommand: >-
+      pip install --no-deps rapidocr-onnxruntime==1.2.3 &&
+      pip install -r requirements.txt
+    startCommand: python server.py --host 0.0.0.0
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.9
+      - key: PUBLIC_DEPLOYMENT
+        value: "1"
+      # The deployed Vercel URL isn't known until that side is set up, so
+      # this is left for you to fill in on Render's dashboard rather than
+      # hardcoded here. Comma-separate more than one if you add a custom
+      # domain later; Vercel's own preview-deploy URLs are covered
+      # automatically (see server.py's CORS setup).
+      - key: ALLOWED_ORIGIN
+        sync: false

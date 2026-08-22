@@ -1,5 +1,26 @@
 # UTR / Payment Detail Extractor
 # Python API + vanilla-JS frontend. No Node, no npm, no build step.
+#
+# rapidocr-onnxruntime is NOT listed below on purpose -- it declares a hard
+# dependency on plain opencv-python (confirmed via `pip show
+# rapidocr-onnxruntime`), which pulls in GTK/X11 shared libraries a minimal
+# server won't have. This project wants opencv-python-headless instead, which
+# needs none of that, so rapidocr-onnxruntime is installed separately with
+# --no-deps and its *other* real dependencies are listed here explicitly in
+# its place:
+#
+#     pip install --no-deps rapidocr-onnxruntime==1.2.3
+#     pip install -r requirements.txt
+#
+# render.yaml's buildCommand already does both steps in order; anyone setting
+# this up by hand (a plain VPS, WSL, etc. -- not the Docker image, which
+# still installs the ordinary way since apt-get can cover the real opencv's
+# needs there) needs to run the first line before the second.
+# Do not raise this past 1.2.3 -- the 1.3+ line caps at Python <3.13.
+pyclipper>=1.3               # rapidocr's polygon post-processing
+PyYAML>=6.0                  # rapidocr's model config files
+shapely>=2.0                 # rapidocr's polygon post-processing
+six>=1.16                    # rapidocr's py2/3 shim
 
 fastapi>=0.110               # HTTP API
 uvicorn[standard]>=0.27      # ASGI server
@@ -7,19 +28,16 @@ python-multipart>=0.0.9      # multipart file uploads
 pydantic>=2.0                # request/response models (fastapi pulls this in
                               # transitively, but server.py imports it directly)
 
-# OCR engine: pip-only, offline, no Tesseract binary needed.
-# Do not raise this to >=1.3 -- that line caps at Python <3.13, so on 3.13 pip
-# would find no installable version at all. 1.2.3 is the newest that works here.
-rapidocr-onnxruntime>=1.2
-
+onnxruntime>=1.15            # rapidocr's inference backend
 pillow>=10.0                 # image loading and preprocessing
 numpy>=1.24
 python-docx>=1.1             # .docx export
 reportlab>=4.0               # .pdf export
 pymupdf>=1.24                # PDF rendering + native text extraction
 # Headless on purpose: core.py's deskew/binarise/illumination steps only ever
-# touch numpy arrays, never a display -- the full opencv-python build pulls in
-# GTK/Qt bindings that need system libraries a server/container won't have.
+# touch numpy arrays, never a display -- see the note at the top of this file
+# for why this needs to be installed instead of rapidocr's own declared
+# opencv-python, not just alongside it.
 opencv-python-headless>=4.9
 
 # Optional: only imported when a Gemini API key is actually configured, and
