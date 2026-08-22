@@ -6,12 +6,15 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-# opencv-python-headless still resolves a couple of shared libraries through
-# glib at import time even with no GUI code in play; without this the first
-# `import cv2` inside core.py fails with a missing .so rather than anything
-# that points at the real cause.
+# requirements.txt asks for opencv-python-headless, but rapidocr-onnxruntime
+# itself declares a hard dependency on plain opencv-python (confirmed via
+# `pip show rapidocr-onnxruntime`) -- pip installs both, and the GUI-linked
+# one is what actually resolves at import time. Rather than fight pip's
+# resolver over which cv2 wins, this just satisfies the shared libraries the
+# full build needs, none of which require an actual display.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libglib2.0-0 \
+    && apt-get install -y --no-install-recommends \
+        libglib2.0-0 libgl1 libsm6 libxext6 libxrender1 libxcb1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
