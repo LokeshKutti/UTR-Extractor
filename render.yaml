@@ -16,6 +16,15 @@ services:
         value: 3.13.9
       - key: PUBLIC_DEPLOYMENT
         value: "1"
+      # Render's free tier caps a service at 512MB RAM, and the "high"
+      # accuracy tier holds up to seven prepared copies of an image in
+      # memory at once (several of them upscaled) -- confirmed directly to
+      # crash the service with an out-of-memory kill. Capping at "balanced"
+      # (four copies, none of the largest upscales) keeps the adaptive
+      # fast-then-escalate behavior for a genuinely poor scan while bounding
+      # the worst case. See core.py's MAX_ACCURACY_TIER handling.
+      - key: MAX_ACCURACY_TIER
+        value: balanced
       # The deployed Vercel URL isn't known until that side is set up, so
       # this is left for you to fill in on Render's dashboard rather than
       # hardcoded here. Comma-separate more than one if you add a custom

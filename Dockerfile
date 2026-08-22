@@ -39,6 +39,12 @@ COPY web ./web
 # instead of the desktop build's "everything stays local" claim, which would
 # be false here. See server.py's PUBLIC_DEPLOYMENT.
 ENV PUBLIC_DEPLOYMENT=1
+# Most container hosts cap a free/starter instance well under 1GB, and the
+# "high" accuracy tier holds up to seven prepared image copies in memory at
+# once -- confirmed to out-of-memory-kill this project's own 512MB Render
+# deployment. See core.py's MAX_ACCURACY_TIER handling and render.yaml's copy
+# of this same setting for the Docker-free deployment path.
+ENV MAX_ACCURACY_TIER=balanced
 
 EXPOSE 8000
 CMD ["python", "server.py", "--host", "0.0.0.0"]

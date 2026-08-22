@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import re
 import sys
 import threading
@@ -28,7 +29,7 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 from statistics import median
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Iterator, Sequence
 
 import numpy as np
 from PIL import Image, ImageEnhance, ImageOps
@@ -359,6 +360,24 @@ def binarise(img: Image.Image) -> Image.Image:
 
 TIER_ORDER = ["fast", "balanced", "high"]
 
+# A hard ceiling on how far accuracy is allowed to go, regardless of what a
+# caller asks for -- unset everywhere except a deployment that opts in by
+# setting MAX_ACCURACY_TIER (see server.py's PUBLIC_DEPLOYMENT). Exists
+# because build_variants(..., "high") holds several upscaled copies of the
+# same image in flight, and on a memory-capped host (Render's free tier is
+# 512MB) that was enough on its own to crash the process -- confirmed
+# directly against this project's own deployment. Local runs, the desktop
+# build, and anyone self-hosting with headroom to spare are unaffected.
+_MAX_TIER = os.environ.get("MAX_ACCURACY_TIER", "").strip().lower()
+if _MAX_TIER and _MAX_TIER not in TIER_ORDER:
+    _MAX_TIER = ""
+
+
+def _capped_tier(tier: str) -> str:
+    if not _MAX_TIER or tier not in TIER_ORDER:
+        return tier
+    return tier if TIER_ORDER.index(tier) <= TIER_ORDER.index(_MAX_TIER) else _MAX_TIER
+
 # Laplacian variance (a standard focus measure -- the second derivative of the
 # image, which is large at crisp edges and collapses toward zero as an edge
 # blurs out) measured after scaling every image to the same reference size.
@@ -439,7 +458,7 @@ def _enhance(img: Image.Image, contrast: float = 1.4, sharp: float = 1.6) -> Ima
 
 def build_variants(
     img: Image.Image, preprocess_mode: str, accuracy: str
-) -> list[tuple[str, Image.Image, dict]]:
+) -> Iterator[tuple[str, Image.Image, dict]]:
     """
     Produce the differently-prepared copies of an image to read.
 
@@ -447,6 +466,14 @@ def build_variants(
     to fail *differently* rather than to all be slightly better -- a blur that
     defeats the sharpened pass often leaves the binarised pass intact, and it is
     that disagreement the voting step exploits.
+
+    A generator rather than a list on purpose: _ocr_pass only ever needs one
+    variant at a time, and "high" builds up to seven of these (several of them
+    upscaled 4x). Materialising all of them before OCR touches the first one
+    meant every one of them was alive in memory simultaneously for no reason --
+    a real contributor on a memory-capped host, confirmed after this project's
+    Render deployment started hitting the platform's 512MB limit. Yielding lets
+    each variant become collectible as soon as _ocr_pass's loop moves past it.
     """
     # Straightening happens once, before anything is derived from the image, so
     # every variant reads the same square page. On a screenshot the estimated
@@ -454,32 +481,32 @@ def build_variants(
     img = deskew(img)
 
     primary = preprocess(img, preprocess_mode)
-    variants: list[tuple[str, Image.Image, dict]] = [("clean", primary, {})]
+    yield ("clean", primary, {})
 
     if accuracy == "fast":
         if preprocess_mode == "auto":
-            variants.append(("raw", img, {}))
-        return variants
+            yield ("raw", img, {})
+        return
 
-    variants.append(("raw", img, {}))
+    yield ("raw", img, {})
 
     # A much larger render, read with looser detection so faint thin strokes
     # still form boxes. This is the single most useful extra pass on the small
     # screenshots people actually paste in.
-    variants.append((
+    yield (
         "big",
         _enhance(_upscale(img, 1800, 4.0), 1.5, 1.9),
         {"text_score": 0.4, "unclip_ratio": 1.9, "box_thresh": 0.4},
-    ))
+    )
     # Same picture, permissive thresholds: recovers characters the default
     # thresholds drop, at the cost of more noise (which voting then discards).
-    variants.append((
+    yield (
         "loose", primary,
         {"text_score": 0.3, "unclip_ratio": 2.1, "box_thresh": 0.32},
-    ))
+    )
 
     if accuracy != "high":
-        return variants
+        return
 
     # Kept at 1500px on purpose. OCR cost scales with pixel area, so a 2600px
     # render costs ~3x a 1500px one; measured on this machine the extra scale
@@ -488,18 +515,17 @@ def build_variants(
     # expensive pass that fails the same way as "big".
     base = _upscale(img, 1500, 4.0)
     gray = ImageOps.autocontrast(ImageOps.grayscale(base), cutoff=1)
-    variants.append(("gray", gray.convert("RGB"), {"text_score": 0.35}))
-    variants.append((
+    yield ("gray", gray.convert("RGB"), {"text_score": 0.35})
+    yield (
         "binary", binarise(gray.convert("RGB")),
         {"text_score": 0.35, "unclip_ratio": 1.8},
-    ))
+    )
     # For photographs: cancel the lighting gradient, then threshold. Useless on
     # a screenshot, but it is the pass that rescues a shadowed paper report.
-    variants.append((
+    yield (
         "camera", binarise(flatten_illumination(base)),
         {"text_score": 0.35, "unclip_ratio": 1.9, "box_thresh": 0.38},
-    ))
-    return variants
+    )
 
 
 def _group_lines(segments: Sequence[Segment]) -> list[Line]:
@@ -708,11 +734,12 @@ def read_image(
     original = load_image(data)
     quality = estimate_quality(original)     # informational only -- see docstring
 
-    tier = auto_base if accuracy == "auto" else accuracy
+    tier = _capped_tier(auto_base if accuracy == "auto" else accuracy)
+    ceiling = _MAX_TIER or "high"
     reads, failure = _ocr_pass(original, runner, chosen, preprocess_mode, tier)
     escalated = False
 
-    while accuracy == "auto" and tier != "high":
+    while accuracy == "auto" and tier != ceiling:
         best_so_far = (max(reads, key=lambda r: (r.word_count, r.mean_conf))
                        if reads else None)
         thin = (best_so_far is None or best_so_far.word_count == 0
