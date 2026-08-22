@@ -386,6 +386,14 @@ pre.ocr {
 <script>
 "use strict";
 
+// Empty means "the same server that's hosting this page" -- true for local
+// dev, the desktop build, and a single-service deploy. Set this to the
+// backend's own URL (e.g. "https://my-app.onrender.com", no trailing slash)
+// only when this file is hosted separately from the API, such as a static
+// Vercel site calling a Render backend -- see DEPLOY.md.
+const API_BASE = "";
+const apiUrl = (path) => API_BASE + path;
+
 /* ------------------------------------------------------------------ state */
 const state = {
   config: null,
@@ -451,7 +459,7 @@ const needsAttention = (t) => t.flag === "high" || t.flag === "low" || t.flag ==
 
 /* ----------------------------------------------------------------- config */
 async function loadConfig() {
-  const res = await fetch("/api/config");
+  const res = await fetch(apiUrl("/api/config"));
   state.config = await res.json();
 
   const deployment = state.config.deployment || {};
@@ -597,7 +605,7 @@ async function handleFiles(files) {
         body.append("custom_pattern", $("#cPat").value);
       }
 
-      const res = await fetch(kind().extract,
+      const res = await fetch(apiUrl(kind().extract),
         { method: "POST", body, signal: state.abort.signal });
       if (!res.ok) {
         const detail = await res.json().catch(() => ({}));
@@ -999,7 +1007,7 @@ async function runAi(record, btn) {
   try {
     const body = new FormData();
     body.append("images", record.file, record.filename);
-    const url = state.docType === "bloodtest" ? "/api/ai/bloodtest" : "/api/ai/extract";
+    const url = apiUrl(state.docType === "bloodtest" ? "/api/ai/bloodtest" : "/api/ai/extract");
     const res = await fetch(url, { method: "POST", body });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
@@ -1249,7 +1257,7 @@ async function download(fmt) {
 // Shared for both document kinds: post the payload, save whatever comes back.
 async function send(url, payload, fmt) {
   try {
-    const res = await fetch(url, {
+    const res = await fetch(apiUrl(url), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
