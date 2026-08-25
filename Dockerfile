@@ -39,14 +39,16 @@ COPY web ./web
 # instead of the desktop build's "everything stays local" claim, which would
 # be false here. See server.py's PUBLIC_DEPLOYMENT.
 ENV PUBLIC_DEPLOYMENT=1
-# Most container hosts cap a free/starter instance well under 1GB. "balanced"
-# was tried first and still crashed this project's own 512MB Render
-# deployment on the very first real request after a restart -- consistent
-# with RapidOCR's one-time model load being the dominant memory cost rather
-# than variant count. "fast" is the smallest footprint short of not running
-# OCR at all. See core.py's MAX_ACCURACY_TIER handling and render.yaml's copy
-# of this same setting for the Docker-free deployment path.
+# Most container hosts cap a free/starter instance well under 1GB. The real
+# mechanism (see core.py's DET_LIMIT_SIDE_LEN comment): RapidOCR's detection
+# network scales every image up to 736px minimum by default, and running that
+# through the network is what spikes memory close to a 512MB ceiling -- not
+# model loading, variant count, or thread pools, all ruled out first.
+# DET_LIMIT_SIDE_LEN=480 cuts that peak by roughly 40% with no measured
+# accuracy loss. MAX_ACCURACY_TIER stays at "fast" as a second, already-
+# verified-safe layer. See render.yaml's copy of both for the Docker-free path.
 ENV MAX_ACCURACY_TIER=fast
+ENV DET_LIMIT_SIDE_LEN=480
 
 EXPOSE 8000
 CMD ["python", "server.py", "--host", "0.0.0.0"]

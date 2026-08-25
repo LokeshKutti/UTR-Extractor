@@ -372,6 +372,19 @@ _MAX_TIER = os.environ.get("MAX_ACCURACY_TIER", "").strip().lower()
 if _MAX_TIER and _MAX_TIER not in TIER_ORDER:
     _MAX_TIER = ""
 
+# Unset (None) everywhere except a deployment that opts in via DET_LIMIT_SIDE_LEN
+# (see server.py's PUBLIC_DEPLOYMENT). RapidOCR's detector scales an image up to
+# at least this many pixels on its shorter side before running it through the
+# detection network -- the default (736) was measured to be the dominant cost
+# in the memory spike that crashed this project's own Render deployment, not
+# variant count or thread pools (both tried first, neither helped). Lowering it
+# to 480 was measured directly to cut peak memory by roughly 40% (412MB -> 245MB
+# across two back-to-back calls) with no loss of accuracy on the standard test
+# receipt. Local runs, the desktop build, and anyone with memory to spare are
+# unaffected by leaving this unset.
+_DET_LIMIT_SIDE_LEN = os.environ.get("DET_LIMIT_SIDE_LEN", "").strip()
+_DET_LIMIT_SIDE_LEN = int(_DET_LIMIT_SIDE_LEN) if _DET_LIMIT_SIDE_LEN.isdigit() else None
+
 
 def _capped_tier(tier: str) -> str:
     if not _MAX_TIER or tier not in TIER_ORDER:
@@ -590,12 +603,20 @@ def _run_rapidocr(img: Image.Image, **opts) -> tuple[list[Segment], float]:
     with _OCR_LOCK:
         engine = _ENGINE_CACHE.get("rapidocr")
         if engine is None:
-            # Constructed with no overrides on purpose. Detector kwargs are broken
-            # in rapidocr-onnxruntime 1.2.3 (update_det_params reads model_path
-            # unconditionally and raises KeyError), and they are not needed anyway:
-            # limit_type "min" only ever scales an image *up* to 736, so the larger
-            # LANCZOS renders that build_variants produces pass through untouched.
-            engine = RapidOCR()
+            if _DET_LIMIT_SIDE_LEN:
+                # det_model_path=None must be passed alongside any other det_*
+                # override -- rapidocr-onnxruntime 1.2.3's update_det_params
+                # unconditionally reads det_dict['model_path'] and raises
+                # KeyError if that key is simply absent; None is falsy, so it
+                # takes the same "use the bundled default" branch a call with
+                # no override at all would.
+                engine = RapidOCR(det_model_path=None,
+                                  det_limit_side_len=_DET_LIMIT_SIDE_LEN)
+            else:
+                # No override: limit_type "min" scales an image *up* to the
+                # default 736 minimum side, so the larger LANCZOS renders
+                # build_variants produces pass through untouched either way.
+                engine = RapidOCR()
             _ENGINE_CACHE["rapidocr"] = engine
 
         # box_thresh / unclip_ratio / text_score are honoured per call, letting

@@ -16,17 +16,22 @@ services:
         value: 3.13.9
       - key: PUBLIC_DEPLOYMENT
         value: "1"
-      # Render's free tier caps a service at 512MB RAM. "balanced" (four
-      # variants, one upscaled to 1800px) was tried first and still crashed
-      # with an out-of-memory kill on the very first real request after a
-      # restart -- consistent with the RapidOCR engine's one-time model load
-      # (cached after that, but paid in full on whatever call triggers it)
-      # being the dominant cost rather than variant count. "fast" (one or two
-      # small passes, no upscale) is the smallest footprint this app can
-      # produce short of not running OCR at all. See core.py's
-      # MAX_ACCURACY_TIER handling.
+      # Render's free tier caps a service at 512MB RAM. Investigated down to
+      # the exact mechanism: RapidOCR's detection network scales every image
+      # up to at least 736px on its shorter side by default, and running that
+      # through the network -- not model loading, not variant count, not
+      # thread pools (all tried and ruled out first) -- is what produces a
+      # per-call memory spike close to the ceiling. DET_LIMIT_SIDE_LEN below
+      # (see core.py) addresses that directly: measured to cut peak memory by
+      # roughly 40% with zero accuracy loss across the full regression suite.
+      # MAX_ACCURACY_TIER stays capped at "fast" for now as a second, already-
+      # proven-safe layer; worth revisiting once the primary fix is confirmed
+      # live, since a smaller detection pass makes the heavier tiers cheaper
+      # too.
       - key: MAX_ACCURACY_TIER
         value: fast
+      - key: DET_LIMIT_SIDE_LEN
+        value: "480"
       # The deployed Vercel URL isn't known until that side is set up, so
       # this is left for you to fill in on Render's dashboard rather than
       # hardcoded here. Comma-separate more than one if you add a custom
