@@ -386,12 +386,15 @@ pre.ocr {
 <script>
 "use strict";
 
-// Empty means "the same server that's hosting this page" -- true for local
-// dev, the desktop build, and a single-service deploy. Set this to the
-// backend's own URL (e.g. "https://my-app.onrender.com", no trailing slash)
-// only when this file is hosted separately from the API, such as a static
-// Vercel site calling a Render backend -- see DEPLOY.md.
-const API_BASE = "https://utr-extractor-api.onrender.com";
+// Empty means "the same server that's hosting this page" -- correct for
+// local dev, the desktop build, and a single-service deploy, since this
+// exact file also gets served locally by `python server.py`. Only switches
+// to the deployed Render URL when the page itself isn't running on
+// localhost, i.e. when it's the copy Vercel is serving as a static site
+// calling a separately-hosted backend -- see DEPLOY.md.
+const API_BASE = (location.hostname === "127.0.0.1" || location.hostname === "localhost")
+  ? ""
+  : "https://utr-extractor-api.onrender.com";
 const apiUrl = (path) => API_BASE + path;
 
 /* ------------------------------------------------------------------ state */
