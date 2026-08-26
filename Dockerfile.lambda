@@ -1,0 +1,32 @@
+# AWS Lambda deployment image -- a separate, differently-shaped path from
+# Dockerfile (a normal always-on container) and render.yaml (Render's
+# Docker-free native runtime). Lambda's own base image (Amazon Linux, not
+# Debian) and folder convention (everything under $LAMBDA_TASK_ROOT) are
+# different enough from both of those to need their own file rather than
+# trying to branch one Dockerfile three ways.
+FROM public.ecr.aws/lambda/python:3.13
+
+# Same reasoning as the main Dockerfile and render.yaml: rapidocr-onnxruntime
+# declares a hard dependency on plain opencv-python, which needs GUI-linked
+# system libraries this base image doesn't have and (unlike the main
+# Dockerfile) there's no apt-get here to install them with anyway --
+# Amazon Linux uses dnf/microdnf, and more importantly opencv-python-headless
+# (installed normally, right after, from requirements.txt) needs none of
+# those libraries in the first place. --no-deps just stops the GUI-linked
+# build from being pulled in at all.
+COPY requirements.txt ${LAMBDA_TASK_ROOT}/
+RUN pip install --no-cache-dir --no-deps rapidocr-onnxruntime==1.2.3 --target "${LAMBDA_TASK_ROOT}" \
+    && pip install --no-cache-dir -r requirements.txt --target "${LAMBDA_TASK_ROOT}"
+
+COPY core.py medical.py server.py ai_assist.py lambda_handler.py ${LAMBDA_TASK_ROOT}/
+COPY web ${LAMBDA_TASK_ROOT}/web
+
+# Tells the interface to show visitors the "this leaves your device" notice.
+# See server.py's PUBLIC_DEPLOYMENT.
+ENV PUBLIC_DEPLOYMENT=1
+# Lambda's own generous memory ceiling (set at the function level, not here)
+# means the accuracy-tier cap and detection-resolution fix that Render needed
+# aren't required for memory reasons -- left unset so this deployment gets
+# full accuracy. Revisit only if a chosen memory size ends up tight.
+
+CMD ["lambda_handler.handler"]

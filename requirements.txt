@@ -27,6 +27,9 @@ uvicorn[standard]>=0.27      # ASGI server
 python-multipart>=0.0.9      # multipart file uploads
 pydantic>=2.0                # request/response models (fastapi pulls this in
                               # transitively, but server.py imports it directly)
+mangum>=0.17                  # wraps the FastAPI app for AWS Lambda -- only
+                              # imported by lambda_handler.py, unused (and
+                              # harmless) everywhere else this app runs
 
 onnxruntime>=1.15            # rapidocr's inference backend
 pillow>=10.0                 # image loading and preprocessing
