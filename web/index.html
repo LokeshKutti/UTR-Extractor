@@ -1281,14 +1281,20 @@ async function send(url, payload, fmt) {
     const blob = await res.blob();
     const disp = res.headers.get("Content-Disposition") || "";
     const guess = /filename="([^"]+)"/.exec(disp);
-    const url = URL.createObjectURL(blob);
+    // Named objectUrl, not url -- this function's own `url` parameter (the
+    // endpoint to POST to) is referenced above at the top of the try block,
+    // and a same-named `const` anywhere later in this scope would shadow it
+    // for the whole function, making that earlier reference throw "Cannot
+    // access 'url' before initialization" instead of ever reaching here.
+    // Confirmed live: this was breaking every export/download.
+    const objectUrl = URL.createObjectURL(blob);
     const a = el("a");
-    a.href = url;
+    a.href = objectUrl;
     a.download = guess ? guess[1] : `utr_extract.${fmt}`;
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
+    URL.revokeObjectURL(objectUrl);
     toast(fmt.toUpperCase() + " downloaded");
   } catch (err) {
     showError("Export failed — " + err.message);
