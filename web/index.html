@@ -389,12 +389,20 @@ pre.ocr {
 // Empty means "the same server that's hosting this page" -- correct for
 // local dev, the desktop build, and a single-service deploy, since this
 // exact file also gets served locally by `python server.py`. Only switches
-// to the deployed Render URL when the page itself isn't running on
-// localhost, i.e. when it's the copy Vercel is serving as a static site
-// calling a separately-hosted backend -- see DEPLOY.md.
+// to the deployed backend when the page itself isn't running on localhost,
+// i.e. when it's the copy Vercel is serving as a static site calling a
+// separately-hosted backend -- see DEPLOY.md.
+//
+// AWS Lambda, not Render -- Render's free tier could not reliably run real
+// OCR requests without hitting its 512MB memory ceiling (see
+// memory_issue_report.pdf for the full investigation). Lambda's memory is
+// configured generously (2048MB, see the function's own settings) with
+// enough headroom that this class of crash doesn't happen; verified
+// directly with repeated real extractions against the live URL below,
+// not just a single request.
 const API_BASE = (location.hostname === "127.0.0.1" || location.hostname === "localhost")
   ? ""
-  : "https://utr-extractor-api.onrender.com";
+  : "https://dearrczrhukuntt6ab65ypfggi0dcwzy.lambda-url.ap-south-1.on.aws";
 const apiUrl = (path) => API_BASE + path;
 
 /* ------------------------------------------------------------------ state */
