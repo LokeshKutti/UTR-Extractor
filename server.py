@@ -25,6 +25,7 @@ import argparse
 import base64
 import io
 import os
+import re
 import sys
 import threading
 import time
@@ -65,6 +66,8 @@ PUBLIC_DEPLOYMENT = os.environ.get("PUBLIC_DEPLOYMENT", "").strip() == "1"
 # per-deploy preview URLs are matched by the regex below instead, since they
 # change on every push and can't be listed individually up front.
 _ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGIN", "").split(",") if o.strip()]
+_VERCEL_ORIGIN_PATTERN = r"https://.*\.vercel\.app"
+_VERCEL_ORIGIN_RE = re.compile(_VERCEL_ORIGIN_PATTERN)
 
 app = FastAPI(title="UTR / Payment Detail Extractor", docs_url="/api/docs")
 
@@ -73,10 +76,32 @@ if _ALLOWED_ORIGINS:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_ALLOWED_ORIGINS,
-        allow_origin_regex=r"https://.*\.vercel\.app",
+        allow_origin_regex=_VERCEL_ORIGIN_PATTERN,
         allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
+
+
+def _cors_origin_for(request: Request) -> str | None:
+    """
+    The Access-Control-Allow-Origin value CORSMiddleware would set for this
+    request, computed the same way it does (exact match against
+    _ALLOWED_ORIGINS, or a full match against the Vercel preview-URL regex).
+
+    Starlette builds its middleware stack in *reverse* registration order, so
+    _rate_limit (registered after CORSMiddleware, below) ends up outermost.
+    Its early 429 return therefore never passes through CORSMiddleware -- that
+    response would ship with no CORS headers at all, which a browser reports
+    as a CORS failure even though the real cause is rate limiting. Attaching
+    the header here directly makes the 429 response correct regardless of
+    middleware order.
+    """
+    origin = request.headers.get("origin")
+    if not origin:
+        return None
+    if origin in _ALLOWED_ORIGINS or _VERCEL_ORIGIN_RE.fullmatch(origin):
+        return origin
+    return None
 
 
 def _client_ip(request: Request) -> str:
@@ -122,11 +147,16 @@ async def _rate_limit(request: Request, call_next):
             while bucket and bucket[0] < cutoff:
                 bucket.pop(0)
             if len(bucket) >= _RATE_LIMIT_MAX_REQUESTS:
-                return JSONResponse(
+                resp = JSONResponse(
                     {"error": "Too many requests from this address -- wait a "
                               "minute and try again."},
                     status_code=429,
                 )
+                origin = _cors_origin_for(request)
+                if origin:
+                    resp.headers["Access-Control-Allow-Origin"] = origin
+                    resp.headers["Vary"] = "Origin"
+                return resp
             bucket.append(now)
     return await call_next(request)
 
