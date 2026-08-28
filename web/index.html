@@ -820,7 +820,7 @@ function imageCard(r, idx) {
   const det = el("details");
   det.appendChild(el("summary", null, "Full OCR text"));
   const inner = el("div", "inner");
-  const pre = el("pre", "ocr", r.full_text || "(no text recovered)");
+  const pre = el("pre", "ocr", r.full_text_display || r.full_text || "(no text recovered)");
   inner.appendChild(pre);
   det.appendChild(inner);
   body.appendChild(det);
@@ -980,7 +980,7 @@ function labCard(r) {
   const det = el("details");
   det.appendChild(el("summary", null, "Full OCR text"));
   const inner = el("div", "inner");
-  inner.appendChild(el("pre", "ocr", r.full_text || "(no text recovered)"));
+  inner.appendChild(el("pre", "ocr", r.full_text_display || r.full_text || "(no text recovered)"));
   det.appendChild(inner);
   body.appendChild(det);
 
@@ -1222,7 +1222,7 @@ async function downloadLab(fmt) {
     reports: chosen.map((r) => ({
       filename: r.filename, engine: r.engine,
       ocr_confidence: r.ocr_confidence, elapsed: r.elapsed,
-      full_text: r.full_text,
+      full_text: r.full_text, full_text_display: r.full_text_display,
       meta: Object.fromEntries((r.meta || []).map((m) => [m.key, m.value])),
       rows: r.tests.filter((t) => String(t.value).trim()).map((t) => ({
         key: t.key, name: t.name, panel: t.panel, value: t.value,
@@ -1253,6 +1253,7 @@ async function download(fmt) {
       ocr_confidence: r.ocr_confidence,
       elapsed: r.elapsed,
       full_text: r.full_text,
+      full_text_display: r.full_text_display,
       fields: r.rows
         .filter((x) => x.value.trim())
         .map((x) => ({

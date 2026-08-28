@@ -73,6 +73,7 @@ class Segment:
     x: float          # left edge
     y: float          # vertical centre
     height: float
+    right: float = 0.0   # right edge; only used for display spacing (see Line.display_text)
 
 
 @dataclass
@@ -83,6 +84,19 @@ class Line:
     @property
     def text(self) -> str:
         return " ".join(s.text for s in self.segments).strip()
+
+    @property
+    def display_text(self) -> str:
+        """
+        Same segments, but a wide visual gap (a second field starting on the
+        same printed row, not just a space between words) renders as extra
+        space instead of being collapsed to one -- purely cosmetic, for the
+        "Full OCR text" a person reads. `text` above stays a plain single-space
+        join because extraction (_find_analyte and friends) matches literal
+        alias strings like "post prandial blood sugar" against it; widening
+        gaps there would silently break those matches.
+        """
+        return _spaced_line(self.segments)
 
     @property
     def conf(self) -> float:
@@ -114,6 +128,11 @@ class OcrResult:
     @property
     def text(self) -> str:
         return "\n".join(ln.text for ln in self.lines if ln.text)
+
+    @property
+    def display_text(self) -> str:
+        """The human-readable counterpart to `text` -- see Line.display_text."""
+        return "\n".join(ln.display_text for ln in self.lines if ln.text)
 
     @property
     def mean_conf(self) -> float:
@@ -183,7 +202,7 @@ def _pdf_native_lines(page) -> list["Line"] | None:
     """
     words = page.get_text("words")     # (x0, y0, x1, y1, text, block, line, word_no)
     segments = [
-        Segment(text=w[4], conf=1.0, x=w[0], y=(w[1] + w[3]) / 2, height=w[3] - w[1])
+        Segment(text=w[4], conf=1.0, x=w[0], y=(w[1] + w[3]) / 2, height=w[3] - w[1], right=w[2])
         for w in words if w[4].strip()
     ]
     if len(segments) < _PDF_NATIVE_MIN_WORDS:
@@ -541,6 +560,32 @@ def build_variants(
     )
 
 
+def _spaced_line(segs: Sequence[Segment]) -> str:
+    """
+    Join one line's segments for reading, widening unusually large gaps.
+
+    A lab report's header routinely carries two or three fields on the same
+    printed row ("Patient Name: ... | Ref. Doctor: ..."); OCR detects each as
+    its own box, correctly far apart, but a plain single-space join (`Line.
+    text`) flattens that gap the same as an ordinary word space, so unrelated
+    fields visually run together. Segments are already sorted left to right
+    by the caller (_group_lines); a gap is judged "wide" against that line's
+    own text height rather than a fixed pixel count, since the same gap means
+    different things at different print sizes/scan resolutions. Two adjacent
+    boxes can come back slightly overlapping (bounding-box imprecision), so a
+    negative gap is clamped to zero rather than producing a run of spaces.
+    """
+    if not segs:
+        return ""
+    parts = [segs[0].text]
+    for prev, cur in zip(segs, segs[1:]):
+        gap = max(0.0, cur.x - prev.right)
+        threshold = max(prev.height, cur.height, 1.0) * 1.2
+        parts.append("   " if gap > threshold else " ")
+        parts.append(cur.text)
+    return "".join(parts).strip()
+
+
 def _group_lines(segments: Sequence[Segment]) -> list[Line]:
     """Merge segments whose vertical centres are close into single lines."""
     if not segments:
@@ -565,11 +610,12 @@ def _group_lines(segments: Sequence[Segment]) -> list[Line]:
     return lines
 
 
-def _box_metrics(box) -> tuple[float, float, float]:
-    """Return (left, vertical-centre, height) for a 4-point polygon."""
+def _box_metrics(box) -> tuple[float, float, float, float]:
+    """Return (left, right, vertical-centre, height) for a 4-point polygon."""
     pts = np.asarray(box, dtype=float).reshape(-1, 2)
     xs, ys = pts[:, 0], pts[:, 1]
-    return float(xs.min()), float((ys.min() + ys.max()) / 2), float(ys.max() - ys.min())
+    return (float(xs.min()), float(xs.max()),
+            float((ys.min() + ys.max()) / 2), float(ys.max() - ys.min()))
 
 
 def available_engines() -> list[str]:
@@ -626,8 +672,8 @@ def _run_rapidocr(img: Image.Image, **opts) -> tuple[list[Segment], float]:
     for box, text, score in (result or []):
         if not str(text).strip():
             continue
-        left, ycentre, height = _box_metrics(box)
-        segments.append(Segment(str(text).strip(), float(score), left, ycentre, height))
+        left, right, ycentre, height = _box_metrics(box)
+        segments.append(Segment(str(text).strip(), float(score), left, ycentre, height, right))
 
     took = float(elapse[0]) if isinstance(elapse, (list, tuple)) and elapse else 0.0
     return segments, took
@@ -647,8 +693,8 @@ def _run_easyocr(img: Image.Image, **opts) -> tuple[list[Segment], float]:
     for box, text, score in detections:
         if not str(text).strip():
             continue
-        left, ycentre, height = _box_metrics(box)
-        segments.append(Segment(str(text).strip(), float(score), left, ycentre, height))
+        left, right, ycentre, height = _box_metrics(box)
+        segments.append(Segment(str(text).strip(), float(score), left, ycentre, height, right))
     return segments, 0.0
 
 
@@ -665,8 +711,9 @@ def _run_tesseract(img: Image.Image, **opts) -> tuple[list[Segment], float]:
         if not word or conf < 0:
             continue
         top, height = float(data["top"][i]), float(data["height"][i])
+        left, width = float(data["left"][i]), float(data["width"][i])
         segments.append(
-            Segment(word, conf / 100.0, float(data["left"][i]), top + height / 2, height)
+            Segment(word, conf / 100.0, left, top + height / 2, height, left + width)
         )
     return segments, 0.0
 
@@ -1724,6 +1771,7 @@ class ExtractionRecord:
     filename: str
     fields: dict[str, list[Match]]
     full_text: str = ""
+    full_text_display: str = ""
     engine: str = ""
     ocr_confidence: float = 0.0
     elapsed: float = 0.0
@@ -1774,6 +1822,24 @@ def _latin1_safe(text: str) -> str:
     return text.encode("latin-1", "replace").decode("latin-1")
 
 
+_MULTISPACE = re.compile(r"  +")
+
+
+def _pdf_preserve_spaces(text: str) -> str:
+    """
+    ReportLab's Paragraph collapses runs of whitespace the way HTML does, so
+    the extra spacing Line.display_text inserts between fields (see core.py's
+    _spaced_line) would otherwise vanish again once it reaches the exported
+    PDF. Widening a run's *extra* spaces to non-breaking ones keeps the first
+    space ordinary so a long line can still wrap there if it needs to, while
+    the run renders at something close to its real width instead of one.
+    Call after escape() -- it only ever touches literal space characters, so
+    the order does not matter for correctness, but escaping nbsp entities
+    themselves would be wrong.
+    """
+    return _MULTISPACE.sub(lambda m: " " + "&nbsp;" * (len(m.group()) - 1), text)
+
+
 def build_txt(records: Sequence[ExtractionRecord], include_raw_text: bool = False) -> bytes:
     out = io.StringIO()
     out.write(f"{APP_TITLE}\n")
@@ -1798,7 +1864,7 @@ def build_txt(records: Sequence[ExtractionRecord], include_raw_text: bool = Fals
 
         if include_raw_text and rec.full_text:
             out.write("\n  --- Full OCR text ---\n")
-            for line in rec.full_text.splitlines():
+            for line in (rec.full_text_display or rec.full_text).splitlines():
                 out.write(f"  {line}\n")
 
     return out.getvalue().encode("utf-8")
@@ -1913,7 +1979,7 @@ def build_docx(records: Sequence[ExtractionRecord], include_raw_text: bool = Fal
 
         if include_raw_text and rec.full_text:
             doc.add_heading("Full OCR text", level=2)
-            block = doc.add_paragraph(rec.full_text)
+            block = doc.add_paragraph(rec.full_text_display or rec.full_text)
             for r in block.runs:
                 r.font.name = "Consolas"
                 r.font.size = Pt(8)
@@ -2008,9 +2074,9 @@ def build_pdf(records: Sequence[ExtractionRecord], include_raw_text: bool = Fals
         if include_raw_text and rec.full_text:
             story.append(Spacer(1, 4 * mm))
             story.append(Paragraph("Full OCR text", styles["Heading4"]))
-            for line in _latin1_safe(rec.full_text).splitlines():
+            for line in _latin1_safe(rec.full_text_display or rec.full_text).splitlines():
                 if line.strip():
-                    story.append(Paragraph(escape(line), style_mono))
+                    story.append(Paragraph(_pdf_preserve_spaces(escape(line)), style_mono))
 
         if idx < len(records):
             story.append(PageBreak())
@@ -2147,6 +2213,7 @@ def run_selftest() -> int:
 
     record = ExtractionRecord(
         filename=sample.name, fields=fields, full_text=ocr.text,
+        full_text_display=ocr.display_text,
         engine=ocr.engine, ocr_confidence=ocr.mean_conf, elapsed=ocr.elapsed,
     )
 

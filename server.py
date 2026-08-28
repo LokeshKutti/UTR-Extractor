@@ -181,6 +181,7 @@ class ExportRecord(BaseModel):
     ocr_confidence: float = 0.0
     elapsed: float = 0.0
     full_text: str = ""
+    full_text_display: str = ""
     fields: list[ExportField] = Field(default_factory=list)
 
 
@@ -209,6 +210,7 @@ class LabReportPayload(BaseModel):
     ocr_confidence: float = 0.0
     elapsed: float = 0.0
     full_text: str = ""
+    full_text_display: str = ""
     meta: dict[str, str] = Field(default_factory=dict)
     rows: list[LabRow] = Field(default_factory=list)
 
@@ -280,6 +282,7 @@ def _record_from_payload(rec: ExportRecord) -> ExtractionRecord:
         filename=rec.filename,
         fields=grouped,
         full_text=rec.full_text,
+        full_text_display=rec.full_text_display,
         engine=rec.engine,
         ocr_confidence=rec.ocr_confidence,
         elapsed=rec.elapsed,
@@ -426,6 +429,7 @@ def extract(
             "ocr_confidence": round(ocr.mean_conf, 3),
             "elapsed": round(ocr.elapsed, 3),
             "full_text": ocr.text,
+            "full_text_display": ocr.display_text,
             "thumbnail": thumbnail,
             "thumbnail_error": thumbnail_error,
             "quality": ocr.quality,
@@ -496,6 +500,7 @@ def bloodtest_extract(
             "ocr_confidence": round(report.ocr_confidence, 3),
             "elapsed": round(report.elapsed, 3),
             "full_text": report.full_text,
+            "full_text_display": report.full_text_display,
             "thumbnail": thumbnail,
             "thumbnail_error": thumbnail_error,
             "quality": ocr.quality,
@@ -529,7 +534,8 @@ def bloodtest_export(request: LabExportRequest) -> Response:
     reports = [
         BloodReport(
             filename=payload.filename, meta=payload.meta,
-            full_text=payload.full_text, engine=payload.engine,
+            full_text=payload.full_text, full_text_display=payload.full_text_display,
+            engine=payload.engine,
             ocr_confidence=payload.ocr_confidence, elapsed=payload.elapsed,
             # Flags are recomputed here, never taken from the request. The
             # browser's flag was right for the value it was computed from, and

@@ -469,6 +469,7 @@ class BloodReport:
     meta: dict[str, str] = field(default_factory=dict)
     results: list[AnalyteResult] = field(default_factory=list)
     full_text: str = ""
+    full_text_display: str = ""
     engine: str = ""
     ocr_confidence: float = 0.0
     elapsed: float = 0.0
@@ -957,6 +958,7 @@ def extract_report(ocr: OcrResult, filename: str = "") -> BloodReport:
 
     return BloodReport(
         filename=filename, meta=meta, results=results, full_text=ocr.text,
+        full_text_display=ocr.display_text,
         engine=ocr.engine, ocr_confidence=ocr.mean_conf, elapsed=ocr.elapsed,
     )
 
@@ -1053,7 +1055,7 @@ def build_txt(reports: Sequence[BloodReport], include_raw_text: bool = False) ->
 
         if include_raw_text and report.full_text:
             out.write("\n  --- Full OCR text ---\n")
-            for line in report.full_text.splitlines():
+            for line in (report.full_text_display or report.full_text).splitlines():
                 out.write(f"  {line}\n")
 
     return out.getvalue().encode("utf-8")
@@ -1139,7 +1141,7 @@ def build_docx(reports: Sequence[BloodReport], include_raw_text: bool = False) -
 
         if include_raw_text and report.full_text:
             doc.add_heading("Full OCR text", level=2)
-            block = doc.add_paragraph(report.full_text)
+            block = doc.add_paragraph(report.full_text_display or report.full_text)
             for run in block.runs:
                 run.font.name = "Consolas"
                 run.font.size = Pt(8)
@@ -1254,9 +1256,9 @@ def build_pdf(reports: Sequence[BloodReport], include_raw_text: bool = False) ->
         if include_raw_text and report.full_text:
             story.append(Spacer(1, 3 * mm))
             story.append(Paragraph("Full OCR text", styles["Heading4"]))
-            for line in core._latin1_safe(report.full_text).splitlines():
+            for line in core._latin1_safe(report.full_text_display or report.full_text).splitlines():
                 if line.strip():
-                    story.append(Paragraph(escape(line), mono))
+                    story.append(Paragraph(core._pdf_preserve_spaces(escape(line)), mono))
 
         if idx < len(reports):
             story.append(PageBreak())
