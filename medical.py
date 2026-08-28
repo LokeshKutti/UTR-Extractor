@@ -63,8 +63,12 @@ def _clean_name(value: str) -> str:
     at the first following label word keeps the name to itself.
     """
     text = _clean_plain(value)
-    text = re.split(r"\s+(?=(?:Age|Sex|Gender|Ref|Reg|Lab|Date|UHID|Bill|"
-                    r"Sample|Patient|Report)\b)", text, maxsplit=1,
+    # Regist\w*, not Reg\b: "Reg" only matches a complete word, so it missed
+    # "Registered Date" entirely (no boundary between "g" and the "i" that
+    # follows) and let a name run on into that neighboring column. Confirmed
+    # on a real report.
+    text = re.split(r"\s+(?=(?:Age|Sex|Gender|Ref|Regist\w*|Reg|Lab|Date|"
+                    r"UHID|Bill|Sample|Patient|Report)\b)", text, maxsplit=1,
                     flags=re.IGNORECASE)[0]
     return text.strip(" :.-,")
 
@@ -79,7 +83,12 @@ META_RULES: list[FieldRule] = [
         # start of a box, so the "TEST NAME" column header cannot match it.
         aliases=["patient name", "patients name", "patient's name",
                  "name of patient", "name"],
-        value_pattern=r"(?:M/?R?S?\.?\s*)?[A-Za-z][A-Za-z.\s]{2,50}",
+        # /  covers "W/O", "S/O", "D/O", "C/O" -- Wife/Son/Daughter/Care Of,
+        # printed as part of the name itself on many Indian reports ("MRS.
+        # CHANDRA W/O ANANDAN"). Without it the match simply stops dead at
+        # the slash, truncating a real name to its first word. Confirmed on
+        # a real report.
+        value_pattern=r"(?:M/?R?S?\.?\s*)?[A-Za-z][A-Za-z./\s]{2,50}",
         # Not strict: several labs print "Patient Name  MR. X" inside one box,
         # and a strict label would refuse to look at the rest of that box. The
         # aliases are long and distinctive enough to be safe unanchored.
@@ -575,6 +584,22 @@ def _parse_row(line: Line, sex: str | None = None) -> AnalyteResult | None:
     if len(text) < 3:
         return None
 
+    # Narrower than _NOT_A_ROW on purpose -- that full blocklist is only
+    # ever applied in _parse_unknown_row, to a line with no matched analyte
+    # at all, where rejecting broadly (even generic words like "desirable")
+    # is safe. Here a real analyte has already matched, so the same full
+    # list is too aggressive: "Desirable: <200" is completely ordinary
+    # cholesterol reference-range phrasing, and blocking on it discarded a
+    # genuine reading (confirmed -- this exact case regressed a previously-
+    # passing real report the first time this used _NOT_A_ROW directly).
+    # What actually needs catching is narrower: a diabetes-control-tier
+    # label sharing a visual row with an analyte's own name ("(HbA1c)
+    # Method:HPLC   6.1 - 7.0 % Good Control" -- a real layout, one
+    # interpretation tier per line, aligned beside the label), which reads
+    # as a second, wrong result for that analyte. Confirmed on a real report.
+    if _CONTROL_TIER_ROW.search(text):
+        return None
+
     hit = _find_analyte(text)
     if not hit:
         return None
@@ -704,6 +729,14 @@ _NOT_A_ROW = re.compile(
     # "Diabetic" and "Prediabetic", and a trailing \b would refuse to match
     # any of them because a letter follows the stem.
     r"non.?diabet\w*|diabet\w*|borderline|desirable|degree of control)",
+    re.IGNORECASE)
+
+# A narrower slice of the same idea, safe to apply even to a row whose name
+# already matched a real analyte -- see _parse_row for why the full
+# _NOT_A_ROW list above is not used there.
+_CONTROL_TIER_ROW = re.compile(
+    r"\b(?:good control|fair control|poor control|unsatisfactory|"
+    r"degree of control)\b",
     re.IGNORECASE)
 
 
