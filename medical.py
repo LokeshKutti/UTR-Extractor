@@ -81,8 +81,14 @@ META_RULES: list[FieldRule] = [
         # then walks off to grab whatever text sits further along that row.
         # "name" last: aliases are tried longest-first, and it is anchored to the
         # start of a box, so the "TEST NAME" column header cannot match it.
+        # "pt's" is the routine abbreviation on many Indian lab reports; OCR
+        # just as routinely drops or misreads its apostrophe, so all three
+        # spellings are listed rather than relying on the loose fallback to
+        # bridge them. Confirmed missing entirely (no match at all, not even
+        # a weak one) on a real report printing "Pt's NAME".
         aliases=["patient name", "patients name", "patient's name",
-                 "name of patient", "name"],
+                 "name of patient", "pt's name", "pts name", "pt s name",
+                 "name"],
         # /  covers "W/O", "S/O", "D/O", "C/O" -- Wife/Son/Daughter/Care Of,
         # printed as part of the name itself on many Indian reports ("MRS.
         # CHANDRA W/O ANANDAN"). Without it the match simply stops dead at
@@ -605,6 +611,20 @@ def _parse_row(line: Line, sex: str | None = None) -> AnalyteResult | None:
     if not hit:
         return None
     analyte, name_end = hit
+
+    # An alias can match only the opening of a fuller parenthetical qualifier
+    # -- "sugar (pp)" matching just the "(PP" of a printed "(PP - 1/2H)" --
+    # because the loose look-alike fallback in _find_analyte walks alnum
+    # characters rather than requiring the whole alias's punctuation to line
+    # up. Left alone, the still-open "(" means the rest of that qualifier
+    # ("- 1/2H)") lands in tail and its own digits get mistaken for the
+    # result. Confirmed on a real report: "SUGAR (PP - 1/2H) : 142 mgs/dl"
+    # read a result of 1, not 142, until this skipped past the close first.
+    open_parens = text[:name_end].count("(") - text[:name_end].count(")")
+    if open_parens > 0:
+        close = text[name_end:].find(")")
+        if close != -1:
+            name_end += close + 1
 
     tail = text[name_end:]
     tail_original = tail
