@@ -110,7 +110,19 @@ META_RULES: list[FieldRule] = [
     FieldRule(
         key="age_sex", label="Age / Sex",
         aliases=["age/sex", "age / sex", "age & sex", "age", "sex", "gender"],
-        value_pattern=r"\d{1,3}\s*(?:y(?:rs?|ears?)?)?\s*[/,]?\s*(?:M|F|Male|Female)?",
+        # The separator also accepts a lone "1" -- a real, repeated OCR
+        # misread of the printed "/" in "55 / Female" -- but only when M/F
+        # actually follows, so a genuine "1" elsewhere in the row is never
+        # swallowed. multi_segment_value matters here specifically because
+        # OCR often boxes the age, the separator and the sex as three
+        # separate segments on one visual row; without it, "55" alone (a
+        # complete match on its own, since sex is optional) wins and the row
+        # is never rejoined with the segment carrying the sex. Confirmed on a
+        # real report: age_sex came back as "55" with the sex silently lost,
+        # which then picked the wrong (Male) half of a sex-split reference
+        # range for an unrelated Haemoglobin row.
+        value_pattern=r"\d{1,3}\s*(?:y(?:rs?|ears?)?)?\s*(?:[/,]|1(?=\s*[MF]))?\s*(?:M|F|Male|Female)?",
+        multi_segment_value=True,
         normalise=_clean_plain,
     ),
     FieldRule(
@@ -257,7 +269,8 @@ ANALYTES: list[Analyte] = [
              "glucose-pp"], "mg/dL", 70.0, 140.0, "Diabetes"),
     Analyte("glucose_r", "Glucose (Random)",
             ["random blood sugar", "blood sugar (random)", "glucose random",
-             "rbs"], "mg/dL", 70.0, 140.0, "Diabetes"),
+             "rbs", "random blood glucose", "glucose (random)",
+             "glucose - random"], "mg/dL", 70.0, 140.0, "Diabetes"),
     Analyte("hba1c", "HbA1c",
             ["hba1c (biorad)", "hba1c(biorad)", "hba1c (bio-rad)", "hba1c",
              "hb a1c", "hba1 c", "glycated haemoglobin",
@@ -268,6 +281,8 @@ ANALYTES: list[Analyte] = [
     Analyte("eag", "Estimated Average Glucose",
             ["estimated average glucose", "estimated glucose level",
              "mean blood glucose", "average blood glucose",
+             "means glucose value", "mean glucose value", "means glucose",
+             "mean glucose",
              "estimated avg glucose", "eag", "eab", "abg"],
             "mg/dL", None, None, "Diabetes"),
 
@@ -310,10 +325,21 @@ ANALYTES: list[Analyte] = [
     # report.
     Analyte("ldl_hdl_ratio", "LDL / HDL Ratio",
             ["ldl/hdl ratio", "ldl / hdl ratio", "ldl/hdl",
+             "ldl/hdl cholesterol ratio", "ldl / hdl cholesterol ratio",
              "coronary risk ratio-ii", "coronary risk ratio -ii",
              "coronary risk ratio - ii", "coronary risk ratio ii",
              "coronary risk ratio-2", "coronary risk ratio -2",
              "coronary risk ratio - 2", "coronary risk ratio 2"],
+            "", None, None, "Lipid Profile"),
+    # HDL/LDL is the inverse of the ratio above and prints as its own row on
+    # reports that show both directions. Without its own entry, "HDL / LDL
+    # Cholesterol Ratio" starts with "HDL" and the hdl_chol analyte's own
+    # alias silently swallows it as a second, wrong HDL Cholesterol reading
+    # -- the same failure mode ldl_hdl_ratio was added to fix, just the other
+    # way round. Confirmed on a real report.
+    Analyte("hdl_ldl_ratio", "HDL / LDL Ratio",
+            ["hdl/ldl ratio", "hdl / ldl ratio", "hdl/ldl",
+             "hdl/ldl cholesterol ratio", "hdl / ldl cholesterol ratio"],
             "", None, None, "Lipid Profile"),
     # Total Cholesterol minus HDL -- a distinct printed row, not a stand-in for
     # Total Cholesterol. Previously absent, so its alias "cholesterol" matched
@@ -341,6 +367,14 @@ ANALYTES: list[Analyte] = [
             "sgpt (alt)"], "U/L", 7.0, 56.0, "Liver Function"),
     Analyte("sgot", "SGOT / AST", ["sgot", "ast", "aspartate aminotransferase",
             "sgot (ast)"], "U/L", 5.0, 40.0, "Liver Function"),
+    # A derived row, not a third liver enzyme -- without its own entry,
+    # "SGOT/SGPT Ratio" starts with "sgot" and gets swallowed as a second,
+    # wrong SGOT/AST reading. Same failure mode as ldl_hdl_ratio above.
+    # Confirmed on a real report.
+    Analyte("sgot_sgpt_ratio", "SGOT / SGPT Ratio",
+            ["sgot/sgpt ratio", "sgot / sgpt ratio", "sgot/sgpt",
+             "ast/alt ratio", "ast / alt ratio"],
+            "", None, None, "Liver Function"),
     Analyte("alp", "Alkaline Phosphatase", ["alkaline phosphatase", "alp"],
             "U/L", 44.0, 147.0, "Liver Function"),
     Analyte("protein_total", "Total Protein", ["total protein", "protein total"],
@@ -348,6 +382,13 @@ ANALYTES: list[Analyte] = [
     Analyte("albumin", "Albumin", ["albumin"], "g/dL", 3.5, 5.2, "Liver Function"),
     Analyte("globulin", "Globulin", ["globulin"], "g/dL", 2.0, 3.5,
             "Liver Function"),
+    # Same failure mode again -- "Albumin/Globulin Ratio" starts with
+    # "albumin" and would otherwise read as a second Albumin value. Confirmed
+    # on a real report.
+    Analyte("ag_ratio", "Albumin / Globulin Ratio",
+            ["albumin/globulin ratio", "albumin / globulin ratio",
+             "albumin/globulin", "a/g ratio", "a: g ratio"],
+            "", None, None, "Liver Function"),
 
     # ---- Kidney and electrolytes ------------------------------------------ #
     Analyte("urea", "Urea", ["blood urea", "urea"], "mg/dL", 15.0, 45.0,
@@ -356,6 +397,19 @@ ANALYTES: list[Analyte] = [
             "mg/dL", 7.0, 20.0, "Kidney Function"),
     Analyte("creatinine", "Creatinine", ["serum creatinine", "creatinine"],
             "mg/dL", 0.6, 1.3, "Kidney Function"),
+    # Two more derived rows with the same failure mode as the liver-panel
+    # ratios above -- "Urea / Sr.Creatinine Ratio" starts with "urea" and
+    # "Bun/Creatinine Ratio" starts with "bun", so without their own entries
+    # each reads as a second, wrong Urea/BUN value. Confirmed on real reports.
+    Analyte("urea_creatinine_ratio", "Urea / Creatinine Ratio",
+            ["urea/creatinine ratio", "urea / creatinine ratio",
+             "urea/sr.creatinine ratio", "urea / sr.creatinine ratio",
+             "urea/creatinine"],
+            "", None, None, "Kidney Function"),
+    Analyte("bun_creatinine_ratio", "BUN / Creatinine Ratio",
+            ["bun/creatinine ratio", "bun / creatinine ratio",
+             "bun/cr ratio", "bun/creatinine"],
+            "", None, None, "Kidney Function"),
     Analyte("uric_acid", "Uric Acid", ["uric acid", "serum uric acid"], "mg/dL",
             3.5, 7.2, "Kidney Function"),
     Analyte("sodium", "Sodium", ["sodium", "na+", "serum sodium"], "mEq/L",
