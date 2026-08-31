@@ -245,14 +245,16 @@ ANALYTES: list[Analyte] = [
             ["blood sugar (fasting)", "blood sugar(fasting)", "fasting blood sugar",
              "blood sugar fasting", "glucose fasting", "fasting glucose",
              "bl.sugar (f)", "bl.sugar(f)", "bl sugar (f)", "b.sugar (f)",
-             "sugar (f)", "fbs", "sugar fasting"], "mg/dL",
+             "sugar (f)", "fbs", "sugar fasting",
+             "glucose (f)", "glucose(f)", "glucose - f", "glucose-f"], "mg/dL",
             70.0, 100.0, "Diabetes"),
     Analyte("glucose_pp", "Glucose (Post Prandial)",
             ["post prandial blood sugar", "blood sugar (p.p)", "blood sugar(p.p)",
              "blood sugar (pp)", "blood sugar(pp)", "glucose post prandial",
              "bl.sugar (pp)", "bl.sugar(pp)", "bl sugar (pp)", "b.sugar(pp)",
              "sugar (pp)", "pp glucose", "ppbs", "blood sugar pp",
-             "post prandial"], "mg/dL", 70.0, 140.0, "Diabetes"),
+             "post prandial", "glucose (pp)", "glucose(pp)", "glucose - pp",
+             "glucose-pp"], "mg/dL", 70.0, 140.0, "Diabetes"),
     Analyte("glucose_r", "Glucose (Random)",
             ["random blood sugar", "blood sugar (random)", "glucose random",
              "rbs"], "mg/dL", 70.0, 140.0, "Diabetes"),
@@ -406,14 +408,22 @@ _ALIAS_INDEX: list[tuple[str, Analyte]] = sorted(
 # "MG%", "mgs/dl" and "mg/dL" for the same thing, so all of them are listed.
 # Order matters: "mg%" must precede "%" or the shorter token wins first.
 UNIT_TOKENS = [
-    "million/µl", "million/ul", "millions/cumm", "lakhs/cumm", "10\\^3/µl",
+    "million/µl", "million/ul", "millions/cumm", "million/cumm", "lakhs/cumm", "10\\^3/µl",
     "x10\\^3/µl", "µiu/ml", "uiu/ml", "miu/l",
     "mgs/dl", "mgs/dl", "mg/dl", "gms/dl", "g/dl", "ng/dl",
     "µg/dl", "ug/dl", "ng/ml", "pg/ml", "µg/l", "mg/l", "meq/l", "mmol/l",
     "µmol/l", "iu/l", "u/l", "mm/hr", "/cumm", "cumm", "/µl", "/ul", "fl",
     "mg%", "gm%", "gms%", "g%", "pg", "%",
 ]
-_UNIT_RE = re.compile(r"(?<![A-Za-z0-9])(" + "|".join(UNIT_TOKENS) + r")(?![A-Za-z])",
+# Preceding digit is allowed on purpose -- "115mg/dl" with no space between
+# the value and its unit is the common case on a printed or OCR'd report, not
+# the exception. Excluding it here (as an excluded-letter-only lookbehind
+# would not) used to leave "mg/dl" glued to the number, and that glued letter
+# is exactly what made the number regex below back off from "115" to "11":
+# its own trailing (?![A-Za-z]) failed against the "m", so it retried with
+# one fewer digit, landed on "5" (a digit, satisfying the guard), and
+# returned "11" as the result. Confirmed on a real report.
+_UNIT_RE = re.compile(r"(?<![A-Za-z])(" + "|".join(UNIT_TOKENS) + r")(?![A-Za-z])",
                       re.IGNORECASE)
 
 # "13.0 - 17.0", "13.0 to 17.0", "< 200", ">= 40", "0.3-1.2"
@@ -522,7 +532,7 @@ _LOOSE_INDEX: list[tuple[str, Analyte]] = sorted(
 # (see prefix_ok in _find_analyte).
 _PREFIX_QUALIFIERS = {
     "serum", "plasma", "blood", "urine", "csf", "s", "sr", "b",
-    "fasting", "random", "post", "prandial", "pp", "venous", "capillary",
+    "fasting", "random", "post", "prandial", "pp", "f", "venous", "capillary",
     "whole", "fresh", "spot", "us", "ultra", "sensitive",
 }
 
