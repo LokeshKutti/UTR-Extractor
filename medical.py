@@ -673,12 +673,36 @@ def _find_analyte(text: str) -> tuple[Analyte, int] | None:
     return None
 
 
-def _parse_row(line: Line, sex: str | None = None) -> AnalyteResult | None:
+def _looks_like_sex_continuation(line: Line) -> bool:
+    """
+    True for a line that carries the other half of a sex-split reference
+    range printed on its own row -- "Female : 11.5 - 16.4)", or "(Method
+    :Automated) Female : 12.0-15.5 Gms %)" when a method note shares the row
+    -- the continuation of a "Haemoglobin ... (Male : 12.5-18.0" row one
+    line up. Not anchored to the start: real reports interleave a trailing
+    method annotation ahead of the sex word as often as not. Requires an
+    actual number range, not just the bare word, and that the line not
+    itself start a new test -- so a genuinely unrelated next row is never
+    folded in by mistake. Confirmed on a real report.
+    """
+    text = line.text.strip()
+    if not re.search(r"\b(?:men|male|women|female)\b", text, re.IGNORECASE):
+        return False
+    if not _RANGE_BETWEEN.search(text):
+        return False
+    return _find_analyte(text) is None
+
+
+def _parse_row(line: Line, sex: str | None = None,
+               next_line: "Line | None" = None) -> AnalyteResult | None:
     """
     Turn one visual line of a lab table into a result, or None.
 
     `sex` comes from the report header. It is used only to choose between
-    ranges that genuinely differ -- never to alter a value.
+    ranges that genuinely differ -- never to alter a value. `next_line` is
+    the row immediately below, consulted only for the one-sided-sex-range
+    case below -- everything else about this row still comes from `line`
+    alone.
     """
     text = line.text.strip()
     if len(text) < 3:
@@ -721,6 +745,28 @@ def _parse_row(line: Line, sex: str | None = None) -> AnalyteResult | None:
 
     tail = text[name_end:]
     tail_original = tail
+
+    # A report that splits its reference range by sex sometimes puts each
+    # half on its own physical line rather than both on the row with the
+    # test -- "Haemoglobin ... (Male : 12.5-18.0" then, alone on the very
+    # next line, "Female : 11.5-16.4)". Only this row's own tail is ever
+    # searched for the *result* itself (folded in below, not into `tail`),
+    # so a continuation can only add a second reference range, never change
+    # what value gets reported. Folding its text in here lets the sex-split
+    # detection just below -- unchanged, already handles both halves on one
+    # line -- see both halves the same way it always has. Only applies when
+    # this row's own tail carries exactly one sex-labelled range: two would
+    # mean the split is already complete, and zero means this was never a
+    # split row to begin with. The pattern itself showed up on three real
+    # reports; the fix was verified end to end (wrong sex-range in, right
+    # one out) on one of them -- the other two are no longer available to
+    # re-run, but the mechanism is the same layout, not a per-report guess.
+    if (next_line is not None
+            and re.search(r"\b(?:men|male|women|female)\b", tail_original,
+                          re.IGNORECASE)
+            and len(_RANGE_BETWEEN.findall(tail_original)) == 1
+            and _looks_like_sex_continuation(next_line)):
+        tail_original = tail_original + " " + next_line.text.strip()
 
     # Pull the reference range out first. It is the most distinctive thing on
     # the row, and removing it stops its numbers being mistaken for the result.
@@ -1019,8 +1065,9 @@ def extract_report(ocr: OcrResult, filename: str = "") -> BloodReport:
         # value would split one row into several when variants misread it
         # differently. Occurrence order survives both.
         seen_in_read: Counter = Counter()
-        for line in read.lines:
-            row = _parse_row(line, sex)
+        for i, line in enumerate(read.lines):
+            next_line = read.lines[i + 1] if i + 1 < len(read.lines) else None
+            row = _parse_row(line, sex, next_line)
             if row is not None:
                 occurrence = seen_in_read[row.key]
                 seen_in_read[row.key] += 1
@@ -1035,10 +1082,11 @@ def extract_report(ocr: OcrResult, filename: str = "") -> BloodReport:
 
     # Second pass for rows no analyte claimed, so an unusual test still shows up.
     for read in reads:
-        for line in read.lines:
+        for i, line in enumerate(read.lines):
             if line.text[:120] in claimed_context:
                 continue
-            if _parse_row(line, sex) is not None:
+            next_line = read.lines[i + 1] if i + 1 < len(read.lines) else None
+            if _parse_row(line, sex, next_line) is not None:
                 continue
             extra = _parse_unknown_row(line)
             if extra is None:
