@@ -70,6 +70,13 @@ def _clean_name(value: str) -> str:
     text = re.split(r"\s+(?=(?:Age|Sex|Gender|Ref|Regist\w*|Reg|Lab|Date|"
                     r"UHID|Bill|Sample|Patient|Report)\b)", text, maxsplit=1,
                     flags=re.IGNORECASE)[0]
+    # A leading "Patient :" survives only on values the scan_patterns below
+    # produced -- their own match has to include the label text, since there
+    # is no separate age/sex label on that layout to anchor a normal match
+    # against and bare "patient" cannot be added as an alias (see the comment
+    # on patient_name). Stripped here rather than there because normalise is
+    # the one step every match, labelled or scanned, always passes through.
+    text = re.sub(r"^patient\s*[:\-]\s*", "", text, flags=re.IGNORECASE)
     return text.strip(" :.-,")
 
 
@@ -99,6 +106,19 @@ META_RULES: list[FieldRule] = [
         # and a strict label would refuse to look at the rest of that box. The
         # aliases are long and distinctive enough to be safe unanchored.
         strict_label=False, multi_segment_value=True, normalise=_clean_name,
+        # Only reached when every alias above found nothing -- covers a
+        # layout with no "Name" label at all, just a bare "Patient :" that
+        # cannot be a normal alias (see above) followed directly by the name
+        # and an "(age/sex)" parenthetical with no label of its own either
+        # ("Patient : Mrs.Meenakumari (60/F)"). Requiring that exact trailing
+        # shape is what makes "patient" safe to match here where it is not as
+        # a plain alias: a genuine "Patient ID : AJH2156" row has no "(nn/M)"
+        # or "(nn/F)" anywhere after it, so it never satisfies this pattern.
+        # Confirmed on a real report.
+        scan_patterns=[
+            (r"(?i)patient\s*:\s*[A-Za-z][A-Za-z./\s]{2,40}?"
+             r"(?=\s*\(\d{1,3}\s*/\s*(?:M|F|Male|Female)\s*\))", 1.0),
+        ],
     ),
     FieldRule(
         key="patient_id", label="Patient / UHID",
@@ -124,6 +144,15 @@ META_RULES: list[FieldRule] = [
         value_pattern=r"\d{1,3}\s*(?:y(?:rs?|ears?)?)?\s*(?:[/,]|1(?=\s*[MF]))?\s*(?:M|F|Male|Female)?",
         multi_segment_value=True,
         normalise=_clean_plain,
+        # Same layout as patient_name's scan_patterns above and reached for
+        # the same reason: a report that gives age/sex only as "(60/F)" right
+        # after the name has no "Age"/"Sex" word anywhere for the aliases
+        # above to find. The parentheses are matched via look-around so they
+        # never end up as part of the captured value. Confirmed on a real
+        # report.
+        scan_patterns=[
+            (r"(?i)(?<=\()\d{1,3}\s*/\s*(?:M|F|Male|Female)(?=\))", 1.0),
+        ],
     ),
     FieldRule(
         key="referred_by", label="Referred By",
