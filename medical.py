@@ -287,7 +287,8 @@ ANALYTES: list[Analyte] = [
              "blood sugar fasting", "glucose fasting", "fasting glucose",
              "bl.sugar (f)", "bl.sugar(f)", "bl sugar (f)", "b.sugar (f)",
              "sugar (f)", "fbs", "sugar fasting",
-             "glucose (f)", "glucose(f)", "glucose - f", "glucose-f"], "mg/dL",
+             "glucose (f)", "glucose(f)", "glucose - f", "glucose-f",
+             "glucose ( f)"], "mg/dL",
             70.0, 100.0, "Diabetes"),
     Analyte("glucose_pp", "Glucose (Post Prandial)",
             ["post prandial blood sugar", "blood sugar (p.p)", "blood sugar(p.p)",
@@ -295,7 +296,7 @@ ANALYTES: list[Analyte] = [
              "bl.sugar (pp)", "bl.sugar(pp)", "bl sugar (pp)", "b.sugar(pp)",
              "sugar (pp)", "pp glucose", "ppbs", "blood sugar pp",
              "post prandial", "glucose (pp)", "glucose(pp)", "glucose - pp",
-             "glucose-pp"], "mg/dL", 70.0, 140.0, "Diabetes"),
+             "glucose-pp", "glucose ( pp)"], "mg/dL", 70.0, 140.0, "Diabetes"),
     Analyte("glucose_r", "Glucose (Random)",
             ["random blood sugar", "blood sugar (random)", "glucose random",
              "rbs", "random blood glucose", "glucose (random)",
@@ -311,7 +312,7 @@ ANALYTES: list[Analyte] = [
             ["estimated average glucose", "estimated glucose level",
              "mean blood glucose", "average blood glucose",
              "means glucose value", "mean glucose value", "means glucose",
-             "mean glucose",
+             "mean glucose", "mean plasma glucose",
              "estimated avg glucose", "eag", "eab", "abg"],
             "mg/dL", None, None, "Diabetes"),
 
@@ -671,6 +672,50 @@ def _find_analyte(text: str) -> tuple[Analyte, int] | None:
                 return analyte, i + 1
         break
     return None
+
+
+_BARE_RESULT_LINE = re.compile(r"^\(?\s*results?\s*:?\s*", re.IGNORECASE)
+# A method note or two, plus an explanatory sentence, comfortably fits inside
+# this; a genuinely unrelated section further down does not. Bounded on
+# purpose so a heading with no continuation at all cannot wander into the
+# next test's territory and misattribute its value.
+_HEADING_LOOKAHEAD = 8
+
+
+def _fold_heading_continuations(lines: list[Line]) -> list[Line]:
+    """
+    Bridge a name-only heading to a value written several lines below it.
+
+    Some reports print the test name as its own row, then one or more lines
+    of method or explanatory text, and only then the actual reading --
+    "GLYCOSYLATED HAEMOGLOBIN" / "(Cation-Exchange Resin Method)" / "(...
+    indicates blood sugar control...)" / "Result : 7.2 %". _parse_row only
+    ever sees one line at a time, so the heading (a real alias match, but no
+    number on it) and the bare "Result :" line (a number, but no analyte
+    name of its own) both fail to parse on their own.
+
+    Every line in between has to fail _find_analyte for the bridge to form,
+    so this can only ever reach the value that actually belongs to the
+    heading above it -- a real, different test starting in between stops
+    the search rather than being skipped over. Confirmed on a real report.
+    """
+    out = list(lines)
+    i = 0
+    while i < len(out):
+        text = out[i].text.strip()
+        hit = _find_analyte(text) if len(text) >= 3 else None
+        if hit and not _NUMBER.search(text[hit[1]:]):
+            for j in range(i + 1, min(i + 1 + _HEADING_LOOKAHEAD, len(out))):
+                cand_text = out[j].text.strip()
+                if _find_analyte(cand_text) is not None:
+                    break
+                m = _BARE_RESULT_LINE.match(cand_text)
+                if m and _NUMBER.search(cand_text[m.end():]):
+                    out[i] = Line(segments=out[i].segments + out[j].segments)
+                    del out[j]
+                    break
+        i += 1
+    return out
 
 
 def _looks_like_sex_continuation(line: Line) -> bool:
@@ -1065,8 +1110,9 @@ def extract_report(ocr: OcrResult, filename: str = "") -> BloodReport:
         # value would split one row into several when variants misread it
         # differently. Occurrence order survives both.
         seen_in_read: Counter = Counter()
-        for i, line in enumerate(read.lines):
-            next_line = read.lines[i + 1] if i + 1 < len(read.lines) else None
+        folded = _fold_heading_continuations(read.lines)
+        for i, line in enumerate(folded):
+            next_line = folded[i + 1] if i + 1 < len(folded) else None
             row = _parse_row(line, sex, next_line)
             if row is not None:
                 occurrence = seen_in_read[row.key]
@@ -1082,10 +1128,11 @@ def extract_report(ocr: OcrResult, filename: str = "") -> BloodReport:
 
     # Second pass for rows no analyte claimed, so an unusual test still shows up.
     for read in reads:
-        for i, line in enumerate(read.lines):
+        folded = _fold_heading_continuations(read.lines)
+        for i, line in enumerate(folded):
             if line.text[:120] in claimed_context:
                 continue
-            next_line = read.lines[i + 1] if i + 1 < len(read.lines) else None
+            next_line = folded[i + 1] if i + 1 < len(folded) else None
             if _parse_row(line, sex, next_line) is not None:
                 continue
             extra = _parse_unknown_row(line)
