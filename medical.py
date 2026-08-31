@@ -324,7 +324,7 @@ ANALYTES: list[Analyte] = [
     # silently overwrote the real HDL Cholesterol reading. Confirmed on a real
     # report.
     Analyte("ldl_hdl_ratio", "LDL / HDL Ratio",
-            ["ldl/hdl ratio", "ldl / hdl ratio", "ldl/hdl",
+            ["ldl/hdl ratio", "ldl / hdl ratio", "ldl/hdl", "ldl/ hdl",
              "ldl/hdl cholesterol ratio", "ldl / hdl cholesterol ratio",
              "coronary risk ratio-ii", "coronary risk ratio -ii",
              "coronary risk ratio - ii", "coronary risk ratio ii",
@@ -338,7 +338,7 @@ ANALYTES: list[Analyte] = [
     # -- the same failure mode ldl_hdl_ratio was added to fix, just the other
     # way round. Confirmed on a real report.
     Analyte("hdl_ldl_ratio", "HDL / LDL Ratio",
-            ["hdl/ldl ratio", "hdl / ldl ratio", "hdl/ldl",
+            ["hdl/ldl ratio", "hdl / ldl ratio", "hdl/ldl", "hdl/ ldl",
              "hdl/ldl cholesterol ratio", "hdl / ldl cholesterol ratio"],
             "", None, None, "Lipid Profile"),
     # Total Cholesterol minus HDL -- a distinct printed row, not a stand-in for
