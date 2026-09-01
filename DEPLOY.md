@@ -1,13 +1,10 @@
 # Deploying this as a public website
 
-This is a separate path from the desktop build (`utrextractor.spec`). The
-desktop build hands someone an .exe that runs entirely on their own PC and
-never talks to a network. This path runs the same app as a server that
-anyone with the URL can reach in their browser -- which means uploaded
-documents leave the visitor's device to get processed. The interface tells
-visitors that plainly (see `PUBLIC_DEPLOYMENT` below); there's no way to
-offer a shared public tool without that trade-off, so it needs to be an
-honest one.
+This runs the app as a server that anyone with the URL can reach in their
+browser -- which means uploaded documents leave the visitor's device to get
+processed. The interface tells visitors that plainly (see
+`PUBLIC_DEPLOYMENT` below); there's no way to offer a shared public tool
+without that trade-off, so it needs to be an honest one.
 
 Two ways to actually host it:
 

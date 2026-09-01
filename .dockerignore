@@ -8,13 +8,7 @@
 __pycache__/
 *.pyc
 
-# PyInstaller desktop build -- unrelated to the container image.
-build/
-dist/
-*.spec
-
 .git/
 .vscode/
 samples/
-Documentation.pdf
 README.md

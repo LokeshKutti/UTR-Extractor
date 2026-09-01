@@ -36,16 +36,7 @@ from PIL import Image, ImageEnhance, ImageOps
 
 APP_TITLE = "UTR / Payment Detail Extractor"
 
-# Under PyInstaller, __file__ for a bundled module resolves inside the frozen
-# archive, not a real directory -- sibling data files like web/ do not live
-# there. sys._MEIPASS is PyInstaller's own answer to "where did you actually
-# put the data files": for a onefile build it is the temp extraction dir, and
-# for a onedir build (used here) it is the _internal folder next to the exe --
-# a location that first looked like a plain sys.executable.parent guess would
-# get wrong, since PyInstaller 6.x moved bundled data into that subfolder
-# rather than placing it beside the exe itself.
-HERE = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) \
-    if getattr(sys, "frozen", False) else Path(__file__).parent
+HERE = Path(__file__).parent
 
 
 # =========================================================================== #

@@ -342,39 +342,6 @@ fallback range. The parser and every export pick it up; no interface changes.
 
 ---
 
-## Giving this to someone else to run
-
-To hand the tool to someone without them installing Python, dependencies, or
-anything else: package it as a standalone Windows app. This builds a folder
-they unzip and double-click — the browser opens itself, and their data stays
-on their machine exactly the way it stays on yours.
-
-```bash
-.venv\Scripts\pip install pyinstaller
-.venv\Scripts\pyinstaller utrextractor.spec --noconfirm
-```
-
-The result lands in `dist\UTR Extractor\`. Zip that whole folder and send it —
-the other person unzips it anywhere and runs `UTR Extractor.exe`. No Python,
-no pip install, no setup on their end. It is roughly 400 MB, almost entirely
-the bundled OCR model and OpenCV/PyMuPDF's native libraries.
-
-A few things worth knowing:
-
-- **The console window is intentional**, not an oversight. If a dependency
-  fails to load on someone else's machine, that window is the only place
-  they'll ever see why — for a first release, that visibility is worth more
-  than a cleaner-looking window that fails silently.
-- **`.env` is never bundled** (only `.env.example`), so the optional Gemini
-  key never ships with the app. Each person who wants that feature adds
-  their own key.
-- Rebuild the package after every source change — it is a snapshot, not a
-  live link to `core.py`/`medical.py`/`web/index.html`.
-- `desktop_launcher.py` is the packaged app's entry point, not `server.py`. It
-  finds a free port itself (in case 8000 is already taken) and opens the
-  browser automatically, since a person who just double-clicked an exe should
-  not have to know a port number.
-
 ## Running it as a public website instead
 
 The exe above runs entirely on one person's PC and never touches a network.
