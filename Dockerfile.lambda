@@ -18,7 +18,7 @@ COPY requirements.txt ${LAMBDA_TASK_ROOT}/
 RUN pip install --no-cache-dir --no-deps rapidocr-onnxruntime==1.2.3 --target "${LAMBDA_TASK_ROOT}" \
     && pip install --no-cache-dir -r requirements.txt --target "${LAMBDA_TASK_ROOT}"
 
-COPY core.py medical.py server.py ai_assist.py lambda_handler.py ${LAMBDA_TASK_ROOT}/
+COPY core.py medical.py server.py ai_assist.py db.py lambda_handler.py ${LAMBDA_TASK_ROOT}/
 COPY web ${LAMBDA_TASK_ROOT}/web
 
 # Tells the interface to show visitors the "this leaves your device" notice.
