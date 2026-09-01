@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 
 import ai_assist
 import core
+import db
 import medical
 from core import (BUILTIN_FIELDS, DEFAULT_ENABLED, ExtractionRecord, Match,
                   NoEngineAvailable, available_engines, build_csv, build_docx,
@@ -442,6 +443,8 @@ def extract(
                 for key, hits in found.items()
             ],
         })
+        db.log_extraction("payment", name,
+                           meta={key: hits[0].value for key, hits in found.items() if hits})
 
     return JSONResponse({"results": results})
 
@@ -517,6 +520,10 @@ def bloodtest_extract(
             "out_of_range": len(report.out_of_range),
             "panels": report.panels,
         })
+        db.log_extraction("blood_test", name, meta=report.meta,
+                           rows=[{"key": r.key, "name": r.name, "value": r.value,
+                                  "unit": r.unit, "ref_text": r.ref_text, "flag": r.flag}
+                                 for r in report.results])
 
     return JSONResponse({"results": results, "disclaimer": medical.DISCLAIMER})
 
