@@ -201,6 +201,16 @@ META_RULES: list[FieldRule] = [
         # report.
         scan_patterns=[
             (r"(?i)(?<=\()\d{1,3}\s*/\s*(?:M|F|Male|Female)(?=\))", 1.0),
+            # A report that gives age/sex as its own bare line -- "70/FEMALE"
+            # on a row by itself, no "Age"/"Sex" word and no parentheses
+            # either -- has nothing at all for the parenthetical pattern
+            # above, or the aliases, to anchor to. Anchored to the WHOLE
+            # line (^...$, not just found somewhere in it) specifically so
+            # this cannot misfire on some unrelated "70/110"-shaped number
+            # pair sitting inside a longer line -- a genuine age/sex report
+            # line really is just this and nothing else. Confirmed on a
+            # real report.
+            (r"(?i)^\s*\d{1,3}\s*/\s*(?:M|F|Male|Female)\s*$", 1.0),
         ],
     ),
     FieldRule(
@@ -1417,7 +1427,9 @@ def _parse_unknown_row(line: Line) -> AnalyteResult | None:
 
 # Last-resort patient-name fallback for a report with no "Name" label
 # anywhere at all -- see _find_name_before_age_sex_line.
-_AGE_SEX_LINE = re.compile(r"^\(?\s*age\s*/?\s*sex\s*:", re.IGNORECASE)
+_AGE_SEX_LINE = re.compile(
+    r"^\(?\s*age\s*/?\s*sex\s*:|^\s*\d{1,3}\s*/\s*(?:M|F|Male|Female)\s*$",
+    re.IGNORECASE)
 _NAME_LIKE_LINE = re.compile(
     r"^(?:mr|mrs|ms|miss|mis|m/s|dr)\.?\s*[A-Za-z][A-Za-z.\s]{2,40}$",
     re.IGNORECASE)
