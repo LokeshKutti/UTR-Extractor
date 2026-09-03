@@ -90,14 +90,18 @@ def _clean_name(value: str) -> str:
     # since that only triggers once nothing usable turned up below the label
     # at all.
     if re.match(r"^(?:Age|Sex|Gender|Ref|Regist\w*|Reg|Lab|Date|UHID|Bill|"
-                r"Sample|Specimen|Patient|Report|of|the|No)\b", text, re.IGNORECASE):
+                r"Sample|Specimen|Patient|Report|of|the|No|Collected|"
+                r"Physician|Referral|Doctor|Consultant|Branch|Mobile|Email|"
+                r"Phone)\b", text, re.IGNORECASE):
         return ""
     # Regist\w*, not Reg\b: "Reg" only matches a complete word, so it missed
     # "Registered Date" entirely (no boundary between "g" and the "i" that
     # follows) and let a name run on into that neighboring column. Confirmed
     # on a real report.
     text = re.split(r"\s+(?=(?:Age|Sex|Gender|Ref|Regist\w*|Reg|Lab|Date|"
-                    r"UHID|Bill|Sample|Specimen|Patient|Report|Dt)\b)", text,
+                    r"UHID|Bill|Sample|Specimen|Patient|Report|Dt|Collected|"
+                    r"Physician|Referral|Doctor|Consultant|Branch|Mobile|"
+                    r"Email|Phone)\b)", text,
                     maxsplit=1, flags=re.IGNORECASE)[0]
     # A leading "Patient :" survives only on values the scan_patterns below
     # produced -- their own match has to include the label text, since there
