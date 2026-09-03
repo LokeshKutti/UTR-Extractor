@@ -787,6 +787,11 @@ _PREFIX_QUALIFIERS = {
     # difference between three real tests being silently dropped entirely
     # and being recognised correctly.
     "fluoride", "edta", "heparin", "citrate", "oxalate",
+    # "Approximate Mean Plasma Glucose" -- the same eAG test this project
+    # already recognises under a dozen other phrasings, just with one more
+    # qualifying word in front that was not on this list either. Confirmed
+    # on a real report.
+    "approximate", "estimated", "calculated",
 }
 
 
