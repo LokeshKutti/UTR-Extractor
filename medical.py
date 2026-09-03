@@ -366,6 +366,7 @@ ANALYTES: list[Analyte] = [
              "bl.sugar (pp)", "bl.sugar(pp)", "bl sugar (pp)", "b.sugar(pp)",
              "sugar (pp)", "pp glucose", "ppbs", "blood sugar pp",
              "post prandial", "postprandial", "blood sugar postprandial",
+             "glucose postprandial",
              "glucose (pp)", "glucose(pp)",
              "glucose - pp", "glucose-pp", "glucose ( pp)",
              "plasma sugar (pp", "plasma sugar(pp", "before lunch plasma glucose"],
@@ -378,6 +379,17 @@ ANALYTES: list[Analyte] = [
             ["hba1c (biorad)", "hba1c(biorad)", "hba1c (bio-rad)", "hba1c",
              "hb a1c", "hba1 c", "hba1_c", "glycated haemoglobin",
              "glycosylated haemoglobin",
+             # Bare, not just the full "glycosylated haemoglobin" phrase --
+             # one report split the test's own name across two lines
+             # ("GLYCOSYLATED" / <value + a tier annotation> / "HAEMOGLOBIN
+             # - HbA1c"), so "haemoglobin" was never on the same line as
+             # "glycosylated" at all. Confirmed on a real report where this
+             # was the difference between the result being silently
+             # dropped -- the row also contained "NON DIABETIC:", which
+             # made it look like pure interpretation-tier noise once it
+             # went entirely unrecognised -- and being read correctly.
+             "glycosylated",
+
              # Spelled out in full rather than abbreviated -- "Hemoglobin
              # A1c 6.16 %" / "Hemoglobin A1 c : 5.90 %". Without these, the
              # bare "haemoglobin"/"hemoglobin" alias below (a different
@@ -765,6 +777,16 @@ _PREFIX_QUALIFIERS = {
     "serum", "plasma", "blood", "urine", "csf", "s", "sr", "b",
     "fasting", "random", "post", "prandial", "pp", "f", "venous", "capillary",
     "whole", "fresh", "spot", "us", "ultra", "sensitive",
+    # Anticoagulant/preservative additives named on the specimen-tube column
+    # -- "Fluoride" for a glucose draw, "EDTA" for CBC/HbA1c -- printed
+    # directly ahead of the test name exactly like "Serum"/"Plasma" already
+    # were, just not previously listed. Without these, a test qualified
+    # this way was rejected outright rather than matched: not a wrong
+    # alias, no alias at all, since the prefix contained a word that was
+    # not on this list. Confirmed on a real report where this was the
+    # difference between three real tests being silently dropped entirely
+    # and being recognised correctly.
+    "fluoride", "edta", "heparin", "citrate", "oxalate",
 }
 
 
@@ -946,23 +968,41 @@ def _looks_like_range_continuation(line: Line) -> bool:
             and not _RANGE_BOUND.search(text))
 
 
-def _tier_from_line(text: str) -> tuple[float | None, float | None] | None:
-    """A (low, high) tier if this line is a bare bound/range annotation, else None."""
+# A tier's own label word says which direction it actually means, which the
+# numbers alone cannot: "Diabetic: > 6.5" is a bound shaped exactly like an
+# ordinary "normal means above this" reference, but landing in it is the
+# ABNORMAL outcome, the opposite of what that bound shape usually implies.
+# Checked in this order (high-direction first) only because "insufficient"
+# contains "sufficient" as a literal substring, and must not be mistaken for
+# the tier that word is stolen from.
+_HIGH_ABNORMAL_WORDS = re.compile(
+    r"\b(?:diabet\w*|elevated|excess\w*|hyper\w*)\b", re.IGNORECASE)
+_LOW_ABNORMAL_WORDS = re.compile(
+    r"\b(?:deficien\w*|insufficien\w*|hypo\w*)\b", re.IGNORECASE)
+
+
+def _tier_from_line(text: str) -> tuple[float | None, float | None, str] | None:
+    """A (low, high, abnormal) tier if this line is a bare bound/range
+    annotation, else None. `abnormal` is "high"/"low" when the tier's own
+    label says which direction landing in it means, else ""."""
     if len(text) > 45 or _find_analyte(text) is not None:
         return None
+    abnormal = ("high" if _HIGH_ABNORMAL_WORDS.search(text)
+                else "low" if _LOW_ABNORMAL_WORDS.search(text) else "")
     between = _RANGE_BETWEEN.search(text)
     if between:
-        return _to_float(between.group(1)), _to_float(between.group(2))
+        return _to_float(between.group(1)), _to_float(between.group(2)), abnormal
     bound = _RANGE_BOUND.search(text)
     if bound:
         limit = _to_float(bound.group(2))
         if bound.group(1).lower() in ("<", "<=", "upto", "up to", "less than"):
-            return None, limit
-        return limit, None
+            return None, limit, abnormal
+        return limit, None, abnormal
     return None
 
 
-def _value_in_tier(numeric: float, low: float | None, high: float | None) -> bool:
+def _value_in_tier(numeric: float, tier: tuple[float | None, float | None, str]) -> bool:
+    low, high, _abnormal = tier
     if low is None and high is None:
         return False
     if low is not None and numeric < low:
@@ -1157,17 +1197,26 @@ def _parse_row(line: Line, sex: str | None = None,
     # exactly one of them and it is not the tier already picked -- an
     # unambiguous case leaves the original, already-correct default alone.
     # Confirmed on a real report.
+    tier_forced_flag = ""
     if numeric is not None and bound and not between:
-        candidates = [(ref_low, ref_high)]
+        # The row's own tier needs the same abnormal-direction check as any
+        # continuation tier -- "NON DIABETIC: < 5.7" is itself a tier in
+        # exactly this same family, and correctly comes back "" (not
+        # abnormal) since it is explicitly negated.
+        own_abnormal = ("high" if _HIGH_ABNORMAL_WORDS.search(tail_original)
+                        else "low" if _LOW_ABNORMAL_WORDS.search(tail_original)
+                        else "")
+        candidates: list[tuple[float | None, float | None, str]] = [
+            (ref_low, ref_high, own_abnormal)]
         for nxt in (next_line, next_line2):
             if nxt is not None:
                 tier = _tier_from_line(nxt.text.strip())
                 if tier:
                     candidates.append(tier)
         if len(candidates) > 1:
-            matching = [t for t in candidates if _value_in_tier(numeric, *t)]
-            if len(matching) == 1 and matching[0] != (ref_low, ref_high):
-                ref_low, ref_high = matching[0]
+            matching = [t for t in candidates if _value_in_tier(numeric, t)]
+            if len(matching) == 1 and matching[0][:2] != (ref_low, ref_high):
+                ref_low, ref_high, tier_forced_flag = matching[0]
                 ref_text = (f"{ref_low:g} - {ref_high:g}"
                             if ref_low is not None and ref_high is not None
                             else f"< {ref_high:g}" if ref_high is not None
@@ -1208,12 +1257,25 @@ def _parse_row(line: Line, sex: str | None = None,
         elif ref_low is not None:
             ref_text = f"> {ref_low:g}"
 
-    flag, implausible_note = ("unknown", "") if sex_split else _verdict(
-        numeric, ref_low, ref_high)
+    if sex_split:
+        flag, implausible_note = "unknown", ""
+    elif tier_forced_flag:
+        # The winning tier's own bound is shaped like an ordinary "normal
+        # means above/below this" reference, but its label says landing in
+        # it IS the abnormal outcome ("Diabetic: > 6.5") -- the opposite of
+        # what that bound shape would otherwise mean. _verdict is bypassed
+        # entirely here rather than fed a bound it would misread.
+        flag, implausible_note = tier_forced_flag, ""
+    else:
+        flag, implausible_note = _verdict(numeric, ref_low, ref_high)
 
     note = ""
     if implausible_note:
         note = implausible_note
+    elif tier_forced_flag:
+        note = ("the report labels this specific tier of its range as the "
+                f"{'high' if tier_forced_flag == 'high' else 'low'} one, "
+                "rather than printing a plain normal/abnormal boundary")
     elif sex_resolved:
         note = (f"the report prints ranges by sex; the "
                 f"{'female' if sex == 'F' else 'male'} range was used")
