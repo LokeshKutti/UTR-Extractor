@@ -68,8 +68,8 @@ def _clean_name(value: str) -> str:
     # follows) and let a name run on into that neighboring column. Confirmed
     # on a real report.
     text = re.split(r"\s+(?=(?:Age|Sex|Gender|Ref|Regist\w*|Reg|Lab|Date|"
-                    r"UHID|Bill|Sample|Patient|Report)\b)", text, maxsplit=1,
-                    flags=re.IGNORECASE)[0]
+                    r"UHID|Bill|Sample|Specimen|Patient|Report)\b)", text,
+                    maxsplit=1, flags=re.IGNORECASE)[0]
     # A leading "Patient :" survives only on values the scan_patterns below
     # produced -- their own match has to include the label text, since there
     # is no separate age/sex label on that layout to anchor a normal match
@@ -264,7 +264,17 @@ ANALYTES: list[Analyte] = [
     Analyte("mch", "MCH", ["mch", "mean corpuscular haemoglobin"], "pg", 27.0, 32.0,
             "Complete Blood Count"),
     Analyte("mchc", "MCHC", ["mchc"], "g/dL", 31.5, 34.5, "Complete Blood Count"),
-    Analyte("rdw", "RDW", ["rdw", "rdw-cv"], "%", 11.6, 14.0, "Complete Blood Count"),
+    # Split into two entries, not one -- RDW-CV (%) and RDW-SD (fL) are
+    # printed as separate rows measuring different things. A single "rdw"
+    # entry with only "rdw-cv" as an extra alias meant "RDW-SD" matched via
+    # the bare "rdw" substring anyway (it contains "rdw"), so the SD reading
+    # landed as a second, wrongly-unitted "RDW" value instead of its own
+    # row. The bare "rdw" alias stays only on -CV, since that is what an
+    # unqualified "RDW" on a report means. Confirmed on a real report.
+    Analyte("rdw_cv", "RDW-CV", ["rdw-cv", "rdw cv", "rdw(cv)", "rdw"], "%",
+            11.6, 14.0, "Complete Blood Count"),
+    Analyte("rdw_sd", "RDW-SD", ["rdw-sd", "rdw sd", "rdw(sd)"], "fL",
+            39.0, 46.0, "Complete Blood Count"),
     Analyte("neutrophils", "Neutrophils", ["neutrophils", "neutrophil"], "%",
             40.0, 80.0, "Differential Count"),
     Analyte("lymphocytes", "Lymphocytes", ["lymphocytes", "lymphocyte"], "%",
@@ -303,8 +313,20 @@ ANALYTES: list[Analyte] = [
              "glucose - random"], "mg/dL", 70.0, 140.0, "Diabetes"),
     Analyte("hba1c", "HbA1c",
             ["hba1c (biorad)", "hba1c(biorad)", "hba1c (bio-rad)", "hba1c",
-             "hb a1c", "hba1 c", "glycated haemoglobin",
-             "glycosylated haemoglobin"], "%", 4.0, 5.6, "Diabetes"),
+             "hb a1c", "hba1 c", "hba1_c", "glycated haemoglobin",
+             "glycosylated haemoglobin",
+             # Spelled out in full rather than abbreviated -- "Hemoglobin
+             # A1c 6.16 %" / "Hemoglobin A1 c : 5.90 %". Without these, the
+             # bare "haemoglobin"/"hemoglobin" alias below (a different
+             # test -- plain CBC Hemoglobin) matched first and the row came
+             # back as a CBC Hemoglobin reading: wrong unit (g/dL vs %),
+             # wrong range (13-17 vs ~4-6), and since HbA1c and Hemoglobin
+             # move in opposite clinical directions, sometimes an inverted
+             # flag too (a high HbA1c reading as a low Hemoglobin).
+             # Confirmed on two different real reports.
+             "hemoglobin a1c", "hemoglobin a1 c", "hemoglobin a1",
+             "haemoglobin a1c", "haemoglobin a1 c", "haemoglobin a1"],
+            "%", 4.0, 5.6, "Diabetes"),
     # Derived from HbA1c, printed under many names. No built-in range: labs
     # publish it against their own bands, so a value with no printed range is
     # reported without a verdict rather than judged against a guess.
@@ -321,15 +343,29 @@ ANALYTES: list[Analyte] = [
             ["serum cholesterol", "serum cholestrol", "total cholesterol",
              "total cholestrol", "cholesterol total", "cholesterol",
              "cholestrol"], "mg/dL", None, 200.0, "Lipid Profile"),
+    # "Cholesterol, HDL"/"Cholesterol, LDL"/"Cholesterol, VLDL" -- the
+    # qualifier printed AFTER the word, comma-separated -- are added
+    # explicitly rather than relying on the fuzzy fallback to bridge them.
+    # The comma breaks an exact match against "hdl cholesterol" (space, no
+    # comma, different word order), so that fails, and the loop moves on to
+    # try shorter aliases -- where bare "cholesterol" (a real alias of Total
+    # Cholesterol) matches "Cholesterol," as a plain substring and wins
+    # first, before the fuzzy fallback that WOULD have handled the comma
+    # ever gets a chance to run. Confirmed on a real report: three distinct
+    # results (HDL/LDL/VLDL) all showed up mislabelled as extra "readings"
+    # of Total Cholesterol.
     Analyte("hdl", "HDL Cholesterol",
-            ["serum hdl cholesterol", "serum hdl", "hdl cholesterol", "hdl"],
+            ["serum hdl cholesterol", "serum hdl", "hdl cholesterol",
+             "cholesterol, hdl", "cholesterol,hdl", "hdl"],
             "mg/dL", 40.0, None, "Lipid Profile", "range differs by sex",
             low_f=50.0),
     Analyte("ldl", "LDL Cholesterol",
-            ["serum ldl cholesterol", "serum ldl", "ldl cholesterol", "ldl"],
+            ["serum ldl cholesterol", "serum ldl", "ldl cholesterol",
+             "cholesterol, ldl", "cholesterol,ldl", "ldl"],
             "mg/dL", None, 100.0, "Lipid Profile"),
     Analyte("vldl", "VLDL Cholesterol",
-            ["serum vldl cholesterol", "serum vldl", "vldl cholesterol", "vldl"],
+            ["serum vldl cholesterol", "serum vldl", "vldl cholesterol",
+             "cholesterol, vldl", "cholesterol,vldl", "vldl"],
             "mg/dL", None, 30.0, "Lipid Profile"),
     Analyte("triglycerides", "Triglycerides",
             ["serum triglycerides", "serum triglericids", "serum triglycerids",
@@ -442,6 +478,16 @@ ANALYTES: list[Analyte] = [
             "", None, None, "Kidney Function"),
     Analyte("uric_acid", "Uric Acid", ["uric acid", "serum uric acid"], "mg/dL",
             3.5, 7.2, "Kidney Function"),
+    # Previously unlisted, so every spelling variant of this very common test
+    # ("Est. Glomerular Filtration Rate", "Est.Glomerular Filtration Rate",
+    # "Est. Glomerular Filtration Rate Serum") landed as three separate
+    # "unknown" rows instead of being recognised -- and deduped -- as one
+    # test read multiple times. Confirmed on a real report.
+    Analyte("egfr", "Estimated GFR",
+            ["estimated glomerular filtration rate",
+             "est. glomerular filtration rate", "est glomerular filtration rate",
+             "estimated gfr", "est. gfr", "est gfr", "egfr"],
+            "mL/min/1.73m2", 90.0, None, "Kidney Function"),
     Analyte("sodium", "Sodium", ["sodium", "na+", "serum sodium"], "mEq/L",
             135.0, 145.0, "Electrolytes"),
     Analyte("potassium", "Potassium", ["potassium", "k+", "serum potassium"],
@@ -477,6 +523,34 @@ ANALYTES: list[Analyte] = [
             240.0, 450.0, "Iron Studies"),
     Analyte("crp", "CRP", ["c reactive protein", "crp", "hs-crp"], "mg/L",
             0.0, 6.0, "Inflammation"),
+
+    # ---- Tumor markers ----------------------------------------------------- #
+    # Unlisted before, so this fell through to the unknown-row path, where
+    # the "125" printed as part of the test's OWN name/abbreviation --
+    # "Cancer Antigen 125 (CA-125)" -- was mistaken for the result itself
+    # (the first number found scanning the row). See the parenthetical-echo
+    # handling in _find_analyte/_parse_unknown_row for the actual fix; this
+    # entry additionally lets a report using this name get a real range and
+    # flag instead of showing up as an unjudged "unknown" row. Confirmed
+    # reproducible across two different labs' reports.
+    # Short forms ("ca-125", "ca125", "ca 125") are deliberately NOT aliases
+    # here. A report's own methodology paragraph routinely opens with prose
+    # like "CA 125 is a second generation assay for the detection of...",
+    # and that sentence matched this test's name just as readily as the
+    # real result row -- confirmed on a real report, reporting a fabricated
+    # value read out of the explanation text instead. Digit-folding in the
+    # fuzzy fallback (1->i, 2->z, 5->s, for OCR look-alikes) made this worse,
+    # not better: even with the exact short alias removed, "ca125" folds to
+    # "caizs", and "CA 125 IS a second..." folds to "caizsisasecond...",
+    # which still starts with "caizs" -- a coincidental collision between a
+    # test name containing real digits and the very next words happening to
+    # continue the pattern once folded. "cancer antigen 125" is long and
+    # distinctive enough that a report's prose is very unlikely to repeat it
+    # verbatim, and it is exactly how the real row on that report was
+    # printed, so it alone is enough to catch it.
+    Analyte("ca125", "Cancer Antigen 125 (CA-125)",
+            ["cancer antigen 125", "cancer antigen-125"],
+            "U/mL", None, 35.0, "Tumor Markers"),
 ]
 
 ANALYTES_BY_KEY = {a.key: a for a in ANALYTES}
@@ -788,6 +862,17 @@ def _parse_row(line: Line, sex: str | None = None,
         if close != -1:
             name_end += close + 1
 
+    # A name-echoing parenthetical straight after the match -- "Cancer
+    # Antigen 125 (CA-125)", "Estimated GFR (eGFR)" -- otherwise leaves its
+    # own digits/letters sitting in tail, where a number inside it (the
+    # "125" in "CA-125") gets mistaken for the row's actual result. Skipped
+    # only when a "(...)" immediately follows the match, so a genuine value
+    # or range starting right after the name is never touched. Confirmed on
+    # a real report.
+    echo = re.match(r"\s*\([A-Za-z0-9\-./]{2,15}\)", text[name_end:])
+    if echo:
+        name_end += echo.end()
+
     tail = text[name_end:]
     tail_original = tail
 
@@ -838,19 +923,39 @@ def _parse_row(line: Line, sex: str | None = None,
     if unit_match:
         tail = tail[:unit_match.start()] + " " + tail[unit_match.end():]
 
-    # Remove *every* remaining range, not just the one taken as the reference.
-    # A row like "SERUM HDL 44 MG% men 30-70 women 30-85" carries two, and if
-    # the second survives, a bound from it gets reported as the patient's
-    # result. Reporting a reference number as a measurement is the worst thing
-    # this parser could do, so anything range-shaped is cleared out first.
-    tail = _RANGE_BETWEEN.sub(" ", tail)
-    tail = _RANGE_BOUND.sub(" ", tail)
+    # A result reported as "<0.005" or ">100" (below/above the assay's
+    # detection limit) is bound-shaped exactly like a reference range is, and
+    # when a *separate* between-style reference was already found above (the
+    # common case: "<0.005 ... Adult : 0.27-5.35"), this leading bound is
+    # still sitting untouched at the front of tail. Caught only when it is
+    # the very first thing left there -- a bound anywhere else really is
+    # leftover reference text, not the result -- and only when a distinct
+    # reference range was already found, so a row with nothing but "<200"
+    # (correctly claimed as the reference itself, above) never reaches this.
+    # Confirmed on a real report: a TSH of "<0.005" was silently dropped from
+    # the row entirely, because the blanket cleanup below erased it -- as if
+    # it were leftover range noise -- before anything ever got a chance to
+    # read it as the patient's actual result.
+    leading_bound = re.match(r"^\s*(<=?|>=?)\s*(\d+(?:[.,]\d+)?)(?![A-Za-z])",
+                              tail)
+    if leading_bound and ref_text:
+        value_text = leading_bound.group(0).strip()
+        numeric = _to_float(leading_bound.group(2))
+    else:
+        # Remove *every* remaining range, not just the one taken as the
+        # reference. A row like "SERUM HDL 44 MG% men 30-70 women 30-85"
+        # carries two, and if the second survives, a bound from it gets
+        # reported as the patient's result. Reporting a reference number as
+        # a measurement is the worst thing this parser could do, so anything
+        # range-shaped is cleared out first.
+        tail = _RANGE_BETWEEN.sub(" ", tail)
+        tail = _RANGE_BOUND.sub(" ", tail)
 
-    number = _NUMBER.search(tail)
-    if not number:
-        return None
-    value_text = number.group(0)
-    numeric = _to_float(value_text)
+        number = _NUMBER.search(tail)
+        if not number:
+            return None
+        value_text = number.group(0)
+        numeric = _to_float(value_text)
 
     # A row printing separate male and female ranges ("men 30-70 women 30-85")
     # cannot be judged from the row alone. Reporting the first range would give
@@ -1058,6 +1163,21 @@ def _parse_unknown_row(line: Line) -> AnalyteResult | None:
     number = _NUMBER.search(text)
     if not number or number.start() == 0:
         return None                     # a row must be named before its value
+
+    # The first number found can be part of the test's own printed name
+    # rather than its result -- "Cancer Antigen 125 (CA-125)" repeats "125"
+    # as the test's own abbreviation right after the name, and naively
+    # taking the first number in the row reports that as a fabricated
+    # result instead of the real value further along. Detected by the
+    # number being echoed inside an immediately-following "(...)", and the
+    # search retried past it for the row's actual value. Confirmed on a
+    # real report, reproduced identically on a second, different lab.
+    echo = re.match(r"\s*\([A-Za-z\-]*" + re.escape(number.group(0)) +
+                    r"[A-Za-z\-]*\)", text[number.end():])
+    if echo:
+        retry = _NUMBER.search(text, number.end() + echo.end())
+        if retry:
+            number = retry
 
     name = text[:number.start()].strip(" :.-|\t")
     # Strip a trailing method column ("GOD-POD", "H.P.L.C") off the name.
