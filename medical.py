@@ -603,9 +603,18 @@ _RANGE_BOUND = re.compile(r"(<=?|>=?|upto|up to|less than|greater than)\s*(\d+(?
 # side, and only checking what came before missed that "rd" glued onto the
 # right side means it is not a standalone number at all. Confirmed on a real
 # report: this genuinely turned a TSH of 1.58 into 3.
+#
+# The boundary set also includes a colon (regular ":" or full-width "："),
+# unlike the plain whitespace-only version above -- "TRIGLYCERIDES(TGL)
+# :98.4" and "...：98.4" are both common, unambiguous "label, then value with
+# no space" layouts, not a token a real value could be glued onto by
+# accident the way a hyphen (still excluded, see D-10 above) can be.
+# Confirmed on a real report: a value directly after a bare colon was
+# invisible to this regex, so the row silently failed to parse at all even
+# though the correct digits were sitting right there.
 _NUMBER = re.compile(
-    r"(?<!\S)[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![A-Za-z])"
-    r"|(?<!\S)[-+]?\d+(?:\.\d+)?(?![A-Za-z])")
+    r"(?<![^\s:：])[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![A-Za-z])"
+    r"|(?<![^\s:：])[-+]?\d+(?:\.\d+)?(?![A-Za-z])")
 
 
 def _to_float(text: str) -> float | None:
@@ -812,6 +821,57 @@ def _looks_like_sex_continuation(line: Line) -> bool:
     return _find_analyte(text) is None
 
 
+# "Ref. Range" (or "Reference Range") starting a line, on its own -- the
+# reference range printed as its own row directly under the test's, rather
+# than sharing the row with the result. Anchored to the start on purpose,
+# unlike the sex-continuation label above: this exact phrase is common
+# enough as an incidental mention elsewhere ("results should always be
+# assessed in the context of the reference range") that matching it
+# anywhere in a line would fold in far too much.
+_RANGE_CONTINUATION_LABEL = re.compile(r"^\(?\s*ref(?:erence)?\.?\s*range\b",
+                                       re.IGNORECASE)
+# The two bounds on that line are as often written "60 100" (just a space)
+# as "60-100" (a dash) -- a bare gap between two numbers is only safe to
+# treat as a range at all because this is only ever tried on a line already
+# confirmed to be nothing but a "Ref. Range" label plus its numbers.
+_BARE_TWO_NUMBERS = re.compile(r"(\d+(?:[.,]\d+)?)\s+(\d+(?:[.,]\d+)?)")
+
+
+def _looks_like_range_continuation(line: Line) -> bool:
+    """
+    True for a line that is nothing but a reference range printed on its own
+    row directly below the test's name and result -- "Fasting Blood Sugar
+    109 Mgs/dl" then, alone on the next line, "Ref. Range 60 100 Mgs/dl".
+    Confirmed on a real report: three tests in a row each had this shape,
+    and each one's own row genuinely carries no range at all -- so without
+    folding the next line in, "no range printed" was not just misleading
+    phrasing, it silently threw away a range that really was on the page,
+    two lines down.
+    """
+    text = line.text.strip()
+    if not _RANGE_CONTINUATION_LABEL.match(text):
+        return False
+    return _find_analyte(text) is None
+
+
+def _parse_range_continuation(line: Line) -> tuple[str, float | None, float | None] | None:
+    """Pull (ref_text, low, high) out of a line already confirmed to be one."""
+    text = _RANGE_CONTINUATION_LABEL.sub("", line.text.strip()).strip(" :.-")
+    between = _RANGE_BETWEEN.search(text)
+    if between:
+        return between.group(0), _to_float(between.group(1)), _to_float(between.group(2))
+    bound = _RANGE_BOUND.search(text)
+    if bound:
+        limit = _to_float(bound.group(2))
+        if bound.group(1).lower() in ("<", "<=", "upto", "up to", "less than"):
+            return bound.group(0), None, limit
+        return bound.group(0), limit, None
+    pair = _BARE_TWO_NUMBERS.search(text)
+    if pair:
+        return pair.group(0), _to_float(pair.group(1)), _to_float(pair.group(2))
+    return None
+
+
 def _parse_row(line: Line, sex: str | None = None,
                next_line: "Line | None" = None) -> AnalyteResult | None:
     """
@@ -917,6 +977,14 @@ def _parse_row(line: Line, sex: str | None = None,
         else:
             ref_low = limit
         tail = tail[:bound.start()] + " " + tail[bound.end():]
+    elif next_line is not None and _looks_like_range_continuation(next_line):
+        # The result's own row carries no range at all -- it is printed as
+        # its own row directly underneath instead. Only the range comes
+        # from next_line; the result itself still comes entirely from this
+        # row, same as the sex-split continuation above.
+        found = _parse_range_continuation(next_line)
+        if found:
+            ref_text, ref_low, ref_high = found
 
     unit_match = _UNIT_RE.search(tail)
     unit = unit_match.group(1) if unit_match else ""
@@ -1243,8 +1311,27 @@ def extract_report(ocr: OcrResult, filename: str = "") -> BloodReport:
                 claimed_context.add(row.context)
                 slot = (row.key, occurrence)
                 current = best_by_key.get(slot)
-                if current is None or row.confidence > current.confidence:
+                if current is None:
                     best_by_key[slot] = row
+                else:
+                    # Prefer a plausible reading over an implausible one
+                    # regardless of which variant's OCR reported higher
+                    # confidence -- different preprocessing passes
+                    # sometimes read the very same printed digits
+                    # differently (one pass prepends a stray extra digit,
+                    # another does not), and a value flagged "check" (see
+                    # _verdict) is exactly the signal that this particular
+                    # read is probably the wrong one. Confirmed on a real
+                    # report: one variant read a value correctly while
+                    # three others each corrupted it differently, and
+                    # without this the corrupted read's own higher OCR
+                    # confidence was what won.
+                    current_ok = current.flag != "check"
+                    row_ok = row.flag != "check"
+                    if row_ok and not current_ok:
+                        best_by_key[slot] = row
+                    elif row_ok == current_ok and row.confidence > current.confidence:
+                        best_by_key[slot] = row
 
     # Second pass for rows no analyte claimed, so an unusual test still shows up.
     for read in reads:
