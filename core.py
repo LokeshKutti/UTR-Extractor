@@ -934,6 +934,10 @@ METHOD_WEIGHT = {
     "inline": 0.98,
     "same-line": 0.94,
     "next-line": 0.86,
+    # Lower than next-line on purpose: label-below-value is a rarer layout
+    # than label-above-value, and this is only ever tried as a last resort
+    # (see FieldRule.lookbehind) once nothing below the label worked at all.
+    "prev-line": 0.70,
     "scan": 0.55,
 }
 
@@ -972,6 +976,12 @@ class FieldRule:
     scan_patterns: Sequence[tuple[str, float]] = ()
     # How many lines below a label to keep looking for its value.
     lookahead: int = 2
+    # How many lines ABOVE a label to check, only once nothing below it (same
+    # box, later box, or lookahead) worked. Opt-in, off by default -- most
+    # fields' real value is never printed before their own label, and making
+    # this universal would trade one false-positive shape for another on
+    # every field. Scoped to just the fields that need it.
+    lookbehind: int = 0
     # Short aliases ("To", "From") must own their whole box or they match noise.
     strict_label: bool = False
     # True for free-text name fields (patient_name, payee, payer, referred_by).
@@ -1350,6 +1360,7 @@ def _extract_labeled(rule: FieldRule, lines: Sequence[Line]) -> list[Match]:
                 continue
 
             # 3. value sits on one of the next lines
+            found_below = False
             for step, k in enumerate(range(i + 1, min(i + 1 + rule.lookahead, len(lines)))):
                 nxt = lines[k]
                 if not nxt.segments:
@@ -1360,7 +1371,27 @@ def _extract_labeled(rule: FieldRule, lines: Sequence[Line]) -> list[Match]:
                                      nxt.conf, decay=1.0 - 0.15 * step)
                     if m:
                         found.append(m)
+                        found_below = True
                         break
+
+            # 4. value sits on one of the PREVIOUS lines -- some reports print
+            # the label as its own row underneath the actual value ("Mrs R.
+            # Seethalakshmi Age 50" then, alone on the next row, "Name") --
+            # the reverse of the far more common label-above-value layout.
+            # Only reached once nothing below the label worked at all.
+            # Confirmed on a real report.
+            if not found_below and rule.lookbehind:
+                for step, k in enumerate(range(i - 1, max(i - 1 - rule.lookbehind, -1), -1)):
+                    prev = lines[k]
+                    if not prev.segments:
+                        continue
+                    vm = value_re.search(prev.text)
+                    if vm:
+                        m = _build_match(rule, vm.group(0), "prev-line", prev,
+                                         prev.conf, decay=1.0 - 0.15 * step)
+                        if m:
+                            found.append(m)
+                            break
 
     return found
 

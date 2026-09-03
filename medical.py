@@ -63,12 +63,41 @@ def _clean_name(value: str) -> str:
     at the first following label word keeps the name to itself.
     """
     text = _clean_plain(value)
+    # A value that itself STARTS with a label word ("Age / Sex", "Date of
+    # Report") is not a name at all -- it is the *next* column's header
+    # bleeding in, on a report that prints every column's header on one
+    # shared row ("Patient's Name  Age / Sex") and every column's value on
+    # the row below. Matching "Patient's Name" here correctly finds that
+    # header row, and the rest of that same row ("Age / Sex") satisfies the
+    # value pattern well enough to be accepted as a name unless rejected
+    # here -- an empty return fails core.py's post-normalise check, which
+    # lets the ordinary next-line lookahead reach the real name one row
+    # down instead of settling for "Age /". Confirmed on a real report.
+    # "of"/"the" catch the same family of false positive one step further
+    # removed: the bare "name" alias (needed for reports with no fuller
+    # label at all) matches just as readily inside "Name of the Lab" or
+    # "Name of Doctor" -- an unrelated field, not the patient's -- and after
+    # "Name" is consumed as the label, what is left starts with "of the ...".
+    # A real name never starts with either word. Confirmed on a real report:
+    # this specific phrase won out over the correct name at equal
+    # confidence, purely because "name" is not anchored to any particular
+    # field the way a fuller label like "patient name" is.
+    # "No" (as in "Sl.No." / a serial-number column) catches a third case in
+    # the same family -- a name-shaped fragment that is really a stray table
+    # header the forward lookahead reached before ever finding the real
+    # name. Rejecting it here is also what lets a rarer label-below-value
+    # layout (see FieldRule.lookbehind) get a chance to look upward instead,
+    # since that only triggers once nothing usable turned up below the label
+    # at all.
+    if re.match(r"^(?:Age|Sex|Gender|Ref|Regist\w*|Reg|Lab|Date|UHID|Bill|"
+                r"Sample|Specimen|Patient|Report|of|the|No)\b", text, re.IGNORECASE):
+        return ""
     # Regist\w*, not Reg\b: "Reg" only matches a complete word, so it missed
     # "Registered Date" entirely (no boundary between "g" and the "i" that
     # follows) and let a name run on into that neighboring column. Confirmed
     # on a real report.
     text = re.split(r"\s+(?=(?:Age|Sex|Gender|Ref|Regist\w*|Reg|Lab|Date|"
-                    r"UHID|Bill|Sample|Specimen|Patient|Report)\b)", text,
+                    r"UHID|Bill|Sample|Specimen|Patient|Report|Dt)\b)", text,
                     maxsplit=1, flags=re.IGNORECASE)[0]
     # A leading "Patient :" survives only on values the scan_patterns below
     # produced -- their own match has to include the label text, since there
@@ -77,7 +106,19 @@ def _clean_name(value: str) -> str:
     # on patient_name). Stripped here rather than there because normalise is
     # the one step every match, labelled or scanned, always passes through.
     text = re.sub(r"^patient\s*[:\-]\s*", "", text, flags=re.IGNORECASE)
-    return text.strip(" :.-,")
+    text = text.strip(" :.-,")
+    # A genuine name is essentially never this short once OCR misreads and
+    # honorifics are accounted for -- but an isolated fragment the loose
+    # next-line/prev-line scan picked up off some unrelated nearby text
+    # often is: a serial-number column header, a month abbreviation out of a
+    # date ("04-Apr-26"). Rather than block-list every such fragment one at
+    # a time as each turns up on a new report, reject anything this short
+    # outright and let scanning continue past it. Confirmed on a real
+    # report where this was the difference between two separate false
+    # positives and the real name three lines away.
+    if len(text) < 5:
+        return ""
+    return text
 
 
 META_RULES: list[FieldRule] = [
@@ -106,6 +147,10 @@ META_RULES: list[FieldRule] = [
         # and a strict label would refuse to look at the rest of that box. The
         # aliases are long and distinctive enough to be safe unanchored.
         strict_label=False, multi_segment_value=True, normalise=_clean_name,
+        # Some reports print "Name" as its own row underneath the actual
+        # patient-info line instead of above it. Scoped to this field only --
+        # see FieldRule.lookbehind.
+        lookbehind=2,
         # Only reached when every alias above found nothing -- covers a
         # layout with no "Name" label at all, just a bare "Patient :" that
         # cannot be a normal alias (see above) followed directly by the name
@@ -1296,10 +1341,47 @@ def _parse_unknown_row(line: Line) -> AnalyteResult | None:
     )
 
 
+# Last-resort patient-name fallback for a report with no "Name" label
+# anywhere at all -- see _find_name_before_age_sex_line.
+_AGE_SEX_LINE = re.compile(r"^\(?\s*age\s*/?\s*sex\s*:", re.IGNORECASE)
+_NAME_LIKE_LINE = re.compile(
+    r"^(?:mr|mrs|ms|miss|mis|m/s|dr)\.?\s*[A-Za-z][A-Za-z.\s]{2,40}$",
+    re.IGNORECASE)
+
+
+def _find_name_before_age_sex_line(ocr: OcrResult) -> str:
+    """
+    A report that never labels the name field at all still reliably prints
+    it as the line immediately above wherever "Age / Sex:" starts -- that's
+    simply how the header block is laid out, label or not. Only ever tried
+    once every labelled path in META_RULES has already come up empty, and
+    only accepted when the candidate line itself looks like a name (an
+    honorific, then letters, nothing else) -- so an unrelated line sitting
+    above a coincidental "Age/Sex"-shaped bit of OCR noise elsewhere on the
+    page is never mistaken for one. Confirmed on a real report.
+    """
+    for read in (ocr.variants or [ocr]):
+        for i, line in enumerate(read.lines):
+            if i == 0:
+                continue
+            if not _AGE_SEX_LINE.match(line.text.strip()):
+                continue
+            candidate = read.lines[i - 1].text.strip()
+            if _NAME_LIKE_LINE.match(candidate):
+                cleaned = _clean_name(candidate)
+                if cleaned:
+                    return cleaned
+    return ""
+
+
 def extract_report(ocr: OcrResult, filename: str = "") -> BloodReport:
     """Read patient metadata and every analyte row out of an OCR'd report."""
     meta_hits = core.extract_fields(ocr, enabled=(), custom_rules=META_RULES)
     meta = {key: hits[0].value for key, hits in meta_hits.items() if hits}
+    if not meta.get("patient_name"):
+        found_name = _find_name_before_age_sex_line(ocr)
+        if found_name:
+            meta["patient_name"] = found_name
     sex = detect_sex(meta)
 
     # Rows come from the single best read. Voting across variants does not help
