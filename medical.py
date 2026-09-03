@@ -917,9 +917,23 @@ def _looks_like_range_continuation(line: Line) -> bool:
     two lines down.
     """
     text = line.text.strip()
-    if not _RANGE_CONTINUATION_LABEL.match(text):
+    if _find_analyte(text) is not None:
         return False
-    return _find_analyte(text) is None
+    if _RANGE_CONTINUATION_LABEL.match(text):
+        return True
+    # No explicit "Ref. Range" label at all -- some reports annotate the
+    # range with just a population/method note instead ("Serum Euthyroid:
+    # 0.80-2.00", "Adult: 4-6"). Accepted only when the line is short and
+    # carries exactly one dash-separated range and no separate bound-style
+    # number -- a real result row is never this sparse on its own, and a
+    # genuinely unrelated range sitting on the very next line for some
+    # other reason essentially never is either. Confirmed on a real
+    # report: without this, a builtin fallback range replaced the report's
+    # own -- 1.16 compared against a wrong 80-200 instead of the printed
+    # 0.80-2.00 -- and got flagged as an implausible misread instead of
+    # the correct, unremarkable normal result it actually was.
+    return (len(text) <= 40 and len(_RANGE_BETWEEN.findall(text)) == 1
+            and not _RANGE_BOUND.search(text))
 
 
 def _parse_range_continuation(line: Line) -> tuple[str, float | None, float | None] | None:
