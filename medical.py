@@ -936,6 +936,32 @@ def _looks_like_range_continuation(line: Line) -> bool:
             and not _RANGE_BOUND.search(text))
 
 
+def _tier_from_line(text: str) -> tuple[float | None, float | None] | None:
+    """A (low, high) tier if this line is a bare bound/range annotation, else None."""
+    if len(text) > 45 or _find_analyte(text) is not None:
+        return None
+    between = _RANGE_BETWEEN.search(text)
+    if between:
+        return _to_float(between.group(1)), _to_float(between.group(2))
+    bound = _RANGE_BOUND.search(text)
+    if bound:
+        limit = _to_float(bound.group(2))
+        if bound.group(1).lower() in ("<", "<=", "upto", "up to", "less than"):
+            return None, limit
+        return limit, None
+    return None
+
+
+def _value_in_tier(numeric: float, low: float | None, high: float | None) -> bool:
+    if low is None and high is None:
+        return False
+    if low is not None and numeric < low:
+        return False
+    if high is not None and numeric > high:
+        return False
+    return True
+
+
 def _parse_range_continuation(line: Line) -> tuple[str, float | None, float | None] | None:
     """Pull (ref_text, low, high) out of a line already confirmed to be one."""
     text = _RANGE_CONTINUATION_LABEL.sub("", line.text.strip()).strip(" :.-")
@@ -955,15 +981,17 @@ def _parse_range_continuation(line: Line) -> tuple[str, float | None, float | No
 
 
 def _parse_row(line: Line, sex: str | None = None,
-               next_line: "Line | None" = None) -> AnalyteResult | None:
+               next_line: "Line | None" = None,
+               next_line2: "Line | None" = None) -> AnalyteResult | None:
     """
     Turn one visual line of a lab table into a result, or None.
 
     `sex` comes from the report header. It is used only to choose between
     ranges that genuinely differ -- never to alter a value. `next_line` is
-    the row immediately below, consulted only for the one-sided-sex-range
-    case below -- everything else about this row still comes from `line`
-    alone.
+    the row immediately below, consulted for the one-sided-sex-range case
+    below and (together with `next_line2`, the row after that) for a
+    multi-tier reference range split across several lines -- everything
+    else about this row still comes from `line` alone.
     """
     text = line.text.strip()
     if len(text) < 3:
@@ -1106,6 +1134,34 @@ def _parse_row(line: Line, sex: str | None = None,
             return None
         value_text = number.group(0)
         numeric = _to_float(value_text)
+
+    # A reference range split into several labelled tiers, each on its own
+    # line ("Deficiency : <=20" / "Insufficiency: 21-29" / "Sufficiency:
+    # >=30"), rather than one single bound. Only the first tier's own bound
+    # was ever seen above (bound, not between -- a between-range is rarely
+    # split into tiers this way, which keeps this narrowly scoped), so a
+    # value that actually belongs in a later tier got compared against the
+    # wrong one entirely: a healthy 34.9 checked against "<=20" (the
+    # deficiency tier alone) came out flagged high. Gathered from up to two
+    # more lines below and only switched to when the value falls inside
+    # exactly one of them and it is not the tier already picked -- an
+    # unambiguous case leaves the original, already-correct default alone.
+    # Confirmed on a real report.
+    if numeric is not None and bound and not between:
+        candidates = [(ref_low, ref_high)]
+        for nxt in (next_line, next_line2):
+            if nxt is not None:
+                tier = _tier_from_line(nxt.text.strip())
+                if tier:
+                    candidates.append(tier)
+        if len(candidates) > 1:
+            matching = [t for t in candidates if _value_in_tier(numeric, *t)]
+            if len(matching) == 1 and matching[0] != (ref_low, ref_high):
+                ref_low, ref_high = matching[0]
+                ref_text = (f"{ref_low:g} - {ref_high:g}"
+                            if ref_low is not None and ref_high is not None
+                            else f"< {ref_high:g}" if ref_high is not None
+                            else f"> {ref_low:g}")
 
     # A row printing separate male and female ranges ("men 30-70 women 30-85")
     # cannot be judged from the row alone. Reporting the first range would give
@@ -1420,7 +1476,8 @@ def extract_report(ocr: OcrResult, filename: str = "") -> BloodReport:
         folded = _fold_heading_continuations(read.lines)
         for i, line in enumerate(folded):
             next_line = folded[i + 1] if i + 1 < len(folded) else None
-            row = _parse_row(line, sex, next_line)
+            next_line2 = folded[i + 2] if i + 2 < len(folded) else None
+            row = _parse_row(line, sex, next_line, next_line2)
             if row is not None:
                 occurrence = seen_in_read[row.key]
                 seen_in_read[row.key] += 1
@@ -1459,7 +1516,8 @@ def extract_report(ocr: OcrResult, filename: str = "") -> BloodReport:
             if line.text[:120] in claimed_context:
                 continue
             next_line = folded[i + 1] if i + 1 < len(folded) else None
-            if _parse_row(line, sex, next_line) is not None:
+            next_line2 = folded[i + 2] if i + 2 < len(folded) else None
+            if _parse_row(line, sex, next_line, next_line2) is not None:
                 continue
             extra = _parse_unknown_row(line)
             if extra is None:
