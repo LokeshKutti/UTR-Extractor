@@ -298,15 +298,19 @@ ANALYTES: list[Analyte] = [
              "bl.sugar (f)", "bl.sugar(f)", "bl sugar (f)", "b.sugar (f)",
              "sugar (f)", "fbs", "sugar fasting",
              "glucose (f)", "glucose(f)", "glucose - f", "glucose-f",
-             "glucose ( f)"], "mg/dL",
+             "glucose ( f)", "plasma sugar (f)", "plasma sugar(f)",
+             "fasting plasma glucose"], "mg/dL",
             70.0, 100.0, "Diabetes"),
     Analyte("glucose_pp", "Glucose (Post Prandial)",
             ["post prandial blood sugar", "blood sugar (p.p)", "blood sugar(p.p)",
              "blood sugar (pp)", "blood sugar(pp)", "glucose post prandial",
              "bl.sugar (pp)", "bl.sugar(pp)", "bl sugar (pp)", "b.sugar(pp)",
              "sugar (pp)", "pp glucose", "ppbs", "blood sugar pp",
-             "post prandial", "glucose (pp)", "glucose(pp)", "glucose - pp",
-             "glucose-pp", "glucose ( pp)"], "mg/dL", 70.0, 140.0, "Diabetes"),
+             "post prandial", "postprandial", "blood sugar postprandial",
+             "glucose (pp)", "glucose(pp)",
+             "glucose - pp", "glucose-pp", "glucose ( pp)",
+             "plasma sugar (pp", "plasma sugar(pp", "before lunch plasma glucose"],
+            "mg/dL", 70.0, 140.0, "Diabetes"),
     Analyte("glucose_r", "Glucose (Random)",
             ["random blood sugar", "blood sugar (random)", "glucose random",
              "rbs", "random blood glucose", "glucose (random)",
@@ -335,6 +339,7 @@ ANALYTES: list[Analyte] = [
              "mean blood glucose", "average blood glucose",
              "means glucose value", "mean glucose value", "means glucose",
              "mean glucose", "mean plasma glucose",
+             "estimation of mean blood glucose", "estimated average blood glucose",
              "estimated avg glucose", "eag", "eab", "abg"],
             "mg/dL", None, None, "Diabetes"),
 
@@ -732,8 +737,22 @@ def _find_analyte(text: str) -> tuple[Analyte, int] | None:
         # a lab's own abbreviation for the name just before it, e.g.
         # "Glycoslated Hb% Conc. (HbA1c)" -- distinguished from the ratio
         # case above by having nothing else inside the parentheses.
-        prefix_words = re.findall(r"[a-z]+", head[:pos])
-        qualifier_ok = all(w in _PREFIX_QUALIFIERS for w in prefix_words)
+        prefix_raw = head[:pos]
+        prefix_words = re.findall(r"[a-z]+", prefix_raw)
+        # A prefix with no letters at all -- pure whitespace/indentation --
+        # trivially satisfies "every word here is a qualifier" (there are
+        # zero words to check), and that is fine: it is the same as no
+        # prefix at all. But a *numbered list marker* ("1. HbA1C has been
+        # endorsed by...") ALSO has no letters in its prefix, and treating
+        # that the same way let a report's own footnote/methodology prose
+        # match as if it were a real table row -- confirmed on a real
+        # report, reproduced on a second, unrelated one, both fabricating a
+        # bogus extra "reading" out of a sentence that just happened to
+        # mention the test's name. A digit anywhere in the prefix is what
+        # actually distinguishes the two: real qualifier words never
+        # contain one.
+        qualifier_ok = (all(w in _PREFIX_QUALIFIERS for w in prefix_words)
+                        and not re.search(r"\d", prefix_raw))
         paren_ok = (pos > 0 and lowered[pos - 1] == "("
                     and after < len(lowered) and lowered[after] == ")")
         prefix_ok = pos == 0 or qualifier_ok or paren_ok
