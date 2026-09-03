@@ -432,16 +432,19 @@ ANALYTES: list[Analyte] = [
     # of Total Cholesterol.
     Analyte("hdl", "HDL Cholesterol",
             ["serum hdl cholesterol", "serum hdl", "hdl cholesterol",
-             "cholesterol, hdl", "cholesterol,hdl", "hdl"],
+             "cholesterol, hdl", "cholesterol,hdl", "cholesterol hdl",
+             "cholesterol - hdl", "hdl"],
             "mg/dL", 40.0, None, "Lipid Profile", "range differs by sex",
             low_f=50.0),
     Analyte("ldl", "LDL Cholesterol",
             ["serum ldl cholesterol", "serum ldl", "ldl cholesterol",
-             "cholesterol, ldl", "cholesterol,ldl", "ldl"],
+             "cholesterol, ldl", "cholesterol,ldl", "cholesterol ldl",
+             "cholesterol - ldl", "ldl"],
             "mg/dL", None, 100.0, "Lipid Profile"),
     Analyte("vldl", "VLDL Cholesterol",
             ["serum vldl cholesterol", "serum vldl", "vldl cholesterol",
-             "cholesterol, vldl", "cholesterol,vldl", "vldl"],
+             "cholesterol, vldl", "cholesterol,vldl", "cholesterol vldl",
+             "cholesterol - vldl", "vldl"],
             "mg/dL", None, 30.0, "Lipid Profile"),
     Analyte("triglycerides", "Triglycerides",
             ["serum triglycerides", "serum triglericids", "serum triglycerids",
@@ -980,10 +983,18 @@ def _looks_like_range_continuation(line: Line) -> bool:
 # Checked in this order (high-direction first) only because "insufficient"
 # contains "sufficient" as a literal substring, and must not be mistaken for
 # the tier that word is stolen from.
+# "High"/"Low" bare are added too -- the standard NCEP cholesterol tiering
+# (Desirable / Borderline High / High) printed on a huge share of lipid
+# panels uses exactly this wording, not "elevated"/"hyper-". Safe to include
+# as bare words specifically because this whole check only ever runs inside
+# _tier_from_line's already-narrow shape (a short line that is nothing but a
+# label plus a bound/range) -- nowhere near broad enough for "high"/"low" in
+# their ordinary generic sense to slip in from unrelated text.
 _HIGH_ABNORMAL_WORDS = re.compile(
-    r"\b(?:diabet\w*|elevated|excess\w*|hyper\w*)\b", re.IGNORECASE)
+    r"\b(?:diabet\w*|elevated|excess\w*|hyper\w*|borderline|high)\b",
+    re.IGNORECASE)
 _LOW_ABNORMAL_WORDS = re.compile(
-    r"\b(?:deficien\w*|insufficien\w*|hypo\w*)\b", re.IGNORECASE)
+    r"\b(?:deficien\w*|insufficien\w*|hypo\w*|low)\b", re.IGNORECASE)
 
 
 def _tier_from_line(text: str) -> tuple[float | None, float | None, str] | None:
