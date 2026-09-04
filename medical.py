@@ -682,6 +682,25 @@ _RANGE_BETWEEN = re.compile(
     r"(\d+(?:[.,]\d+)?)\s*(?:-|–|—|to)\s*(\d+(?:[.,]\d+)?)", re.IGNORECASE)
 _RANGE_BOUND = re.compile(r"(<=?|>=?|upto|up to|less than|greater than)\s*(\d+(?:[.,]\d+)?)",
                           re.IGNORECASE)
+# An age bracket ("55-80 yrs : 0.35-4.5") is between-range-shaped exactly
+# like the real reference range that follows it, and .search() finds
+# whichever comes first on the line -- the age bracket, if it is printed
+# before the actual range as a lead-in to which row of an age-banded table
+# applies. Confirmed on a real report: this is what a TSH of 0.146 was
+# actually compared against, instead of the real 0.35-4.5 printed right
+# after it.
+_AGE_BRACKET_RANGE = re.compile(
+    r"\d+(?:[.,]\d+)?\s*(?:-|–|—|to)\s*\d+(?:[.,]\d+)?\s*(?:yrs?|years?)\b",
+    re.IGNORECASE)
+
+
+def _first_real_range(tail: str) -> re.Match | None:
+    """The first _RANGE_BETWEEN match in tail that isn't an age bracket."""
+    for m in _RANGE_BETWEEN.finditer(tail):
+        if _AGE_BRACKET_RANGE.match(tail, m.start()):
+            continue
+        return m
+    return None
 # (?<!\S) requires the number to start at a real token boundary -- preceded by
 # whitespace or the start of the string. Without it, a method/analyzer name
 # like "BIO RAD D-10 Analyzer" reads as containing the number -10 (from
@@ -1194,7 +1213,7 @@ def _parse_row(line: Line, sex: str | None = None,
     # the row, and removing it stops its numbers being mistaken for the result.
     ref_text, ref_low, ref_high = "", None, None
     sex_resolved = False
-    between = _RANGE_BETWEEN.search(tail)
+    between = _first_real_range(tail)
     bound = _RANGE_BOUND.search(tail)
 
     if between:
