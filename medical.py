@@ -459,6 +459,15 @@ ANALYTES: list[Analyte] = [
     Analyte("chol_hdl_ratio", "Total Cholesterol / HDL Ratio",
             ["total cholesterol/hdl", "total cholesterol / hdl",
              "cholesterol/hdl ratio", "tc/hdl ratio", "chol/hdl ratio",
+             # Reversed word order -- "Cholesterol Total/Cholesterol HDL",
+             # not "Total Cholesterol/HDL" -- from the same report that
+             # needed HDL/LDL/VLDL's own space/dash-separator variants.
+             # Without it this matched bare "cholesterol" and overwrote the
+             # real Total Cholesterol reading, same failure mode as the
+             # original bug this analyte was added to fix. Confirmed on a
+             # real report.
+             "cholesterol total/cholesterol hdl",
+             "cholesterol total / cholesterol hdl",
              "coronary risk ratio-1", "coronary risk ratio -1",
              "coronary risk ratio - 1", "coronary risk ratio 1",
              "coronary risk ratio-i"],
@@ -471,6 +480,11 @@ ANALYTES: list[Analyte] = [
     Analyte("ldl_hdl_ratio", "LDL / HDL Ratio",
             ["ldl/hdl ratio", "ldl / hdl ratio", "ldl/hdl", "ldl/ hdl",
              "ldl/hdl cholesterol ratio", "ldl / hdl cholesterol ratio",
+             # Same reversed-order variant as chol_hdl_ratio above --
+             # "Cholesterol LDL/Cholesterol HDL", not "LDL/HDL Cholesterol
+             # Ratio". Confirmed on a real report.
+             "cholesterol ldl/cholesterol hdl",
+             "cholesterol ldl / cholesterol hdl",
              "coronary risk ratio-ii", "coronary risk ratio -ii",
              "coronary risk ratio - ii", "coronary risk ratio ii",
              "coronary risk ratio-2", "coronary risk ratio -2",
@@ -1077,6 +1091,21 @@ def _parse_row(line: Line, sex: str | None = None,
     # interpretation tier per line, aligned beside the label), which reads
     # as a second, wrong result for that analyte. Confirmed on a real report.
     if _CONTROL_TIER_ROW.search(text):
+        return None
+
+    # A square-bracketed *multi-word phrase* -- "[Primary Target of
+    # Therapy]" -- is a reliable signal that this line is explanatory
+    # legend text ("LDL Cholesterol (mg/dL) <100 Optimal, [Primary Target
+    # of Therapy], 100-129 - Near Optimal...") rather than an actual result
+    # row: several distinct tiers crammed onto one line, not the report's
+    # own printed reading. Left alone, the first tier's own bound gets
+    # mistaken for the row's value, with a later tier's range mistaken for
+    # its reference. Requiring a space inside the brackets is what keeps
+    # this from rejecting a real row that uses brackets the same way
+    # parentheses are used elsewhere, for a short abbreviation -- "Estimated
+    # Glucose Level [GH]" has no space inside its brackets and is
+    # unaffected. Confirmed on a real report.
+    if re.search(r"\[[^\]]*\s[^\]]*\]", text):
         return None
 
     hit = _find_analyte(text)
