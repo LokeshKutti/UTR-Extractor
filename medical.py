@@ -190,7 +190,7 @@ META_RULES: list[FieldRule] = [
         # real report: age_sex came back as "55" with the sex silently lost,
         # which then picked the wrong (Male) half of a sex-split reference
         # range for an unrelated Haemoglobin row.
-        value_pattern=r"\d{1,3}\s*(?:y(?:rs?|ears?)?)?\s*(?:[/,]|1(?=\s*[MF]))?\s*(?:M|F|Male|Female)?",
+        value_pattern=r"\d{1,3}(?:\.\d+)?\s*(?:y(?:rs?|ears?)?)?\s*(?:[/,]|1(?=\s*[MF]))?\s*(?:M|F|Male|Female)?",
         multi_segment_value=True,
         normalise=_clean_plain,
         # Same layout as patient_name's scan_patterns above and reached for
