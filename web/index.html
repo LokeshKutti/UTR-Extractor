@@ -15,8 +15,9 @@
   --ink-2: #5b6675;
   --ink-3: #8a94a6;
   --line: #e2e7ee;
-  --accent: #3d7eff;
-  --accent-soft: rgba(61, 126, 255, 0.10);
+  --accent: #7c3aed;
+  --accent-soft: rgba(124, 58, 237, 0.10);
+  --accent-grad: linear-gradient(135deg, #7c3aed, #d946ef);
   --high: #1e9c5a;   --high-bg: rgba(35, 160, 90, 0.14);
   --med: #c88a12;    --med-bg: rgba(220, 160, 30, 0.16);
   --low: #d24545;    --low-bg: rgba(220, 70, 70, 0.14);
@@ -32,7 +33,7 @@
   :root {
     --bg: #0f141b; --panel: #161d27; --panel-2: #1b2431;
     --ink: #e8edf4; --ink-2: #a2adbd; --ink-3: #6f7c8f;
-    --line: #262f3d; --accent: #5b93ff; --accent-soft: rgba(91, 147, 255, .14);
+    --line: #262f3d; --accent: #a78bfa; --accent-soft: rgba(167, 139, 250, .14);
     --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
   }
 }
@@ -83,7 +84,7 @@ h1 { font-size: 26px; letter-spacing: -.02em; margin: 0 0 5px; }
   transition: .12s;
 }
 .btn:hover { border-color: var(--accent); color: var(--accent); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary { background: var(--accent-grad); border-color: var(--accent); color: #fff; }
 .btn.primary:hover { filter: brightness(1.08); color: #fff; }
 .btn.block { display: block; width: 100%; margin-bottom: 8px; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
@@ -227,7 +228,7 @@ pre.ocr {
   text-align: center; transition: .12s;
 }
 .mode:hover { color: var(--ink); }
-.mode.on { background: var(--accent); color: #fff; }
+.mode.on { background: var(--accent-grad); color: #fff; }
 .mode small { display: block; font-weight: 500; font-size: 11px; opacity: .8; }
 
 /* ------------------------------------------------------------ lab report */
