@@ -563,11 +563,15 @@ ANALYTES: list[Analyte] = [
     Analyte("urea_creatinine_ratio", "Urea / Creatinine Ratio",
             ["urea/creatinine ratio", "urea / creatinine ratio",
              "urea/sr.creatinine ratio", "urea / sr.creatinine ratio",
-             "urea/creatinine"],
+             "urea/creatinine",
+             # Space only, no slash at all -- "Urea Creatinine Ratio".
+             # Confirmed on a real report.
+             "urea creatinine ratio"],
             "", None, None, "Kidney Function"),
     Analyte("bun_creatinine_ratio", "BUN / Creatinine Ratio",
             ["bun/creatinine ratio", "bun / creatinine ratio",
-             "bun/cr ratio", "bun/creatinine"],
+             "bun/cr ratio", "bun/creatinine",
+             "bun creatinine ratio"],
             "", None, None, "Kidney Function"),
     Analyte("uric_acid", "Uric Acid", ["uric acid", "serum uric acid"], "mg/dL",
             3.5, 7.2, "Kidney Function"),
@@ -664,7 +668,12 @@ UNIT_TOKENS = [
     "mgs/dl", "mgs/dl", "mg/dl", "gms/dl", "g/dl", "ng/dl",
     "µg/dl", "ug/dl", "ng/ml", "pg/ml", "µg/l", "mg/l", "meq/l", "mmol/l",
     "µmol/l", "iu/l", "u/l", "mm/hr", "/cumm", "cumm", "/µl", "/ul", "fl",
-    "mg%", "gm%", "gms%", "g%", "pg", "%",
+    # \s? tolerates an OCR-introduced stray space before "%" ("mgs %" read
+    # as two tokens instead of one) -- without it, that variant's "%" alone
+    # matched instead (still a valid, if wrong, alternative in this list),
+    # and on a real report it was the higher-confidence of the two reads,
+    # so the truncated unit is what won.
+    "mg\\s?%", "mgs\\s?%", "gm\\s?%", "gms\\s?%", "g\\s?%", "pg", "%",
 ]
 # Preceding digit is allowed on purpose -- "115mg/dl" with no space between
 # the value and its unit is the common case on a printed or OCR'd report, not
