@@ -860,6 +860,20 @@ def _find_analyte(text: str) -> tuple[Analyte, int] | None:
                     and after < len(lowered) and lowered[after] == ")")
         prefix_ok = pos == 0 or qualifier_ok or paren_ok
         if before_ok and after_ok and prefix_ok:
+            # "hb" is the shortest, most generic alias this project has --
+            # and OCR just as often misreads the "1" in "A1C" as a capital
+            # "I", lowercase "i" or "l" as it reads it correctly. On those
+            # reads, none of HbA1c's own aliases match exactly ("a1c" != a
+            # literal "aic"/"alc"), the loop falls all the way down to bare
+            # "hb", and returns immediately -- never reaching the loose/fold
+            # fallback just below, which folds "1"/"l" the same way and
+            # WOULD have matched correctly. Caught here instead of removing
+            # "hb" outright, which stays a completely legitimate alias for
+            # plain Haemoglobin the rest of the time. Confirmed on a real
+            # report, reproduced identically across three of its four OCR
+            # passes.
+            if alias == "hb" and re.match(r"\s*a[i1l]\s*c\b", lowered[after:after + 6]):
+                continue
             return analyte, after      # index is longest-first: first hit wins
 
     # Fallback: compare with look-alikes folded. Positions no longer line up
