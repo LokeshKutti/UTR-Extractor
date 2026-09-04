@@ -1138,6 +1138,19 @@ def _parse_row(line: Line, sex: str | None = None,
     if echo:
         name_end += echo.end()
 
+    # A descriptive sentence about the test ("HbA1c is an index of your
+    # blood sugar control for the past 3 months") starts with the test's
+    # own name at position 0, which is unconditionally trusted -- unlike
+    # the numbered-footnote case, there is no digit-prefix signal to catch
+    # this one. A linking verb immediately after the name is a reliable,
+    # narrow tell that this is prose describing the test, not a row
+    # reporting it: a real result never reads "HbA1c is ...", it reads
+    # "HbA1c 6.1 % ...". Confirmed on a real report, where the stray "3" in
+    # "past 3 months" was otherwise mistaken for a fabricated result.
+    if re.match(r"^\s+(?:is|was|are|were|measures?|indicates?|reflects?|"
+                r"represents?|refers?)\b", text[name_end:], re.IGNORECASE):
+        return None
+
     tail = text[name_end:]
     tail_original = tail
 
