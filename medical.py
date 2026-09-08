@@ -307,12 +307,27 @@ ANALYTES: list[Analyte] = [
     Analyte("rbc", "RBC Count", ["rbc count", "rbc", "red blood cell",
             "total rbc"], "million/µL", 4.5, 5.5, "Complete Blood Count",
             "range differs by sex", low_f=3.8, high_f=4.8),
+    # "Total WBC Count"/"Total WBC count" doesn't match the bare "wbc count"
+    # alias below as a substring match -- "total" sits directly in front of
+    # it, and "total" is not a recognised specimen/timing qualifier, so
+    # _find_analyte's prefix check rejects the match and the row goes
+    # unrecognised. Added as its own explicit alias, same as "total
+    # leucocyte count" already was. Confirmed on three real reports.
     Analyte("wbc", "WBC / Total Leucocyte Count",
-            ["total leucocyte count", "total leukocyte count", "wbc count",
-             "tlc", "wbc", "leucocyte count"], "/µL", 4000, 11000,
-            "Complete Blood Count"),
+            ["total leucocyte count", "total leukocyte count",
+             "total wbc count", "wbc count", "tlc", "wbc", "leucocyte count"],
+            "/µL", 4000, 11000, "Complete Blood Count"),
     Analyte("platelet", "Platelet Count",
             ["platelet count", "platelets", "plt"], "/µL", 150000, 450000,
+            "Complete Blood Count"),
+    # Previously absent entirely -- both print as a bare abbreviation on
+    # every real report seen, never spelled out. Confirmed on three real
+    # reports.
+    Analyte("mpv", "MPV (Mean Platelet Volume)",
+            ["mean platelet volume", "mpv"], "fL", 7.0, 11.0,
+            "Complete Blood Count"),
+    Analyte("pdw", "PDW (Platelet Distribution Width)",
+            ["platelet distribution width", "pdw"], "fL", 11.0, 22.0,
             "Complete Blood Count"),
     Analyte("hct", "Haematocrit / PCV",
             ["haematocrit", "hematocrit", "pcv", "packed cell volume", "hct"],
@@ -459,6 +474,11 @@ ANALYTES: list[Analyte] = [
     Analyte("chol_hdl_ratio", "Total Cholesterol / HDL Ratio",
             ["total cholesterol/hdl", "total cholesterol / hdl",
              "cholesterol/hdl ratio", "tc/hdl ratio", "chol/hdl ratio",
+             # Spaced-slash and dotted-abbreviation variants -- "Chol / HDL
+             # Ratio" and "T.CHOL/HDL RATIO" -- neither matches the tighter
+             # forms above as a plain substring. Confirmed on three real
+             # reports.
+             "chol / hdl ratio", "t.chol/hdl ratio", "t. chol/hdl ratio",
              # Reversed word order -- "Cholesterol Total/Cholesterol HDL",
              # not "Total Cholesterol/HDL" -- from the same report that
              # needed HDL/LDL/VLDL's own space/dash-separator variants.
@@ -536,6 +556,17 @@ ANALYTES: list[Analyte] = [
             "", None, None, "Liver Function"),
     Analyte("alp", "Alkaline Phosphatase", ["alkaline phosphatase", "alp"],
             "U/L", 44.0, 147.0, "Liver Function"),
+    # Previously absent entirely. Real reports print this under several
+    # forms -- full name with a hyphen in either spot ("Gamma
+    # Glutamyl-Transferase" / "Gamma-Glutamyl Transferase"), a bare "(GGT)"
+    # parenthetical after the full name, and one lab's own dotted
+    # abbreviation "GAMMA G.T" with no "transferase" at all. Confirmed
+    # across three real reports.
+    Analyte("ggt", "GGT (Gamma Glutamyl Transferase)",
+            ["gamma glutamyl transferase", "gamma-glutamyl transferase",
+             "gamma glutamyl-transferase", "gamma glutamyltransferase",
+             "gamma-glutamyltransferase", "gamma g.t", "gamma gt", "ggt"],
+            "U/L", None, 55.0, "Liver Function"),
     Analyte("protein_total", "Total Protein", ["total protein", "protein total"],
             "g/dL", 6.4, 8.3, "Liver Function"),
     Analyte("albumin", "Albumin", ["albumin"], "g/dL", 3.5, 5.2, "Liver Function"),
