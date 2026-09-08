@@ -92,16 +92,31 @@ def _clean_name(value: str) -> str:
     if re.match(r"^(?:Age|Sex|Gender|Ref|Regist\w*|Reg|Lab|Date|UHID|Bill|"
                 r"Sample|Specimen|Patient|Report|of|the|No|Collected|"
                 r"Physician|Referral|Doctor|Consultant|Branch|Mobile|Email|"
-                r"Phone)\b", text, re.IGNORECASE):
+                r"Phone|Ordered|SID)\b", text, re.IGNORECASE):
         return ""
     # Regist\w*, not Reg\b: "Reg" only matches a complete word, so it missed
     # "Registered Date" entirely (no boundary between "g" and the "i" that
     # follows) and let a name run on into that neighboring column. Confirmed
     # on a real report.
+    # "Ordered On" (as a compound phrase -- see below) and "SID" (a lab's
+    # own sample/serial id column, printed as a bare word right after the
+    # name) catch two more real reports where the name ran on into the next
+    # crowded column.
     text = re.split(r"\s+(?=(?:Age|Sex|Gender|Ref|Regist\w*|Reg|Lab|Date|"
                     r"UHID|Bill|Sample|Specimen|Patient|Report|Dt|Collected|"
                     r"Physician|Referral|Doctor|Consultant|Branch|Mobile|"
-                    r"Email|Phone)\b)", text,
+                    # "Ordered\s*On", not a bare "Ordered\b": the one space
+                    # this value had between "MAYILSAMY" and "ORDERED" (the
+                    # only whitespace left for this split to even trigger
+                    # on) had already been swallowed elsewhere by the time
+                    # this runs, leaving "ORDEREDON" glued into one word --
+                    # a trailing \b right after "Ordered" alone can never
+                    # match in the middle of that word. Requiring "On" right
+                    # after (space optional) still anchors on the same real
+                    # label and gets a trailing boundary that genuinely
+                    # exists, from whatever follows "On" instead. Confirmed
+                    # on a real report.
+                    r"Email|Phone|Ordered\s*On|SID)\b)", text,
                     maxsplit=1, flags=re.IGNORECASE)[0]
     # A leading "Patient :" survives only on values the scan_patterns below
     # produced -- their own match has to include the label text, since there
@@ -138,8 +153,13 @@ META_RULES: list[FieldRule] = [
         # spellings are listed rather than relying on the loose fallback to
         # bridge them. Confirmed missing entirely (no match at all, not even
         # a weak one) on a real report printing "Pt's NAME".
+        # "pt.name"/"pt name" (no possessive "s" at all, just the bare
+        # abbreviation "Pt") is a distinct, real variant from "pt's name"
+        # above -- confirmed on two real reports from the same lab, both
+        # printing "Pt.Name:".
         aliases=["patient name", "patients name", "patient's name",
                  "name of patient", "pt's name", "pts name", "pt s name",
+                 "pt.name", "pt name", "pt. name",
                  "name"],
         # /  covers "W/O", "S/O", "D/O", "C/O" -- Wife/Son/Daughter/Care Of,
         # printed as part of the name itself on many Indian reports ("MRS.
@@ -178,7 +198,8 @@ META_RULES: list[FieldRule] = [
     ),
     FieldRule(
         key="age_sex", label="Age / Sex",
-        aliases=["age/sex", "age / sex", "age & sex", "age", "sex", "gender"],
+        aliases=["age/sex", "age / sex", "age & sex", "age&sex", "age", "sex",
+                 "gender"],
         # The separator also accepts a lone "1" -- a real, repeated OCR
         # misread of the printed "/" in "55 / Female" -- but only when M/F
         # actually follows, so a genuine "1" elsewhere in the row is never
@@ -190,7 +211,20 @@ META_RULES: list[FieldRule] = [
         # real report: age_sex came back as "55" with the sex silently lost,
         # which then picked the wrong (Male) half of a sex-split reference
         # range for an unrelated Haemoglobin row.
-        value_pattern=r"\d{1,3}(?:\.\d+)?\s*(?:y(?:rs?|ears?)?)?\s*(?:[/,]|1(?=\s*[MF]))?\s*(?:M|F|Male|Female)?",
+        # The optional "sex\s*:?\s*" right before the M/F group handles a
+        # report that prints Age and Sex as two separate adjacent labelled
+        # fields on one row ("Age :50 Sex :Male") rather than one combined
+        # label -- without it, matching stopped at "50" because "Sex" is
+        # not one of "M/F/Male/Female" and nothing skips past that second
+        # label to reach the value after it. Confirmed on a real report.
+        # (A capital "I" as a look-alike misread of "/" was tried and
+        # reverted -- "36 YIMALE" glues "I" directly onto "MALE" with no
+        # separating space, unlike the "1" case above, which real reports
+        # always print with a space before the sex. Capturing "I" into the
+        # value produced "36YIM" with no word boundary before the "M", which
+        # detect_sex's \bM\b then failed to match -- worse than leaving the
+        # sex unparsed, since it looks like a proper reading but is not one.)
+        value_pattern=r"\d{1,3}(?:\.\d+)?\s*(?:y(?:rs?|ears?)?)?\s*(?:[/,]|1(?=\s*[MF]))?\s*(?:sex\s*:?\s*)?(?:M|F|Male|Female)?",
         multi_segment_value=True,
         normalise=_clean_plain,
         # Same layout as patient_name's scan_patterns above and reached for
@@ -370,6 +404,7 @@ ANALYTES: list[Analyte] = [
             ["blood sugar (fasting)", "blood sugar(fasting)", "fasting blood sugar",
              "blood sugar fasting", "glucose fasting", "fasting glucose",
              "bl.sugar (f)", "bl.sugar(f)", "bl sugar (f)", "b.sugar (f)",
+             "bld sugar (f)", "bld sugar(f)", "bld sugar fasting",
              "sugar (f)", "fbs", "sugar fasting",
              "glucose (f)", "glucose(f)", "glucose - f", "glucose-f",
              "glucose ( f)", "plasma sugar (f)", "plasma sugar(f)",
@@ -379,6 +414,7 @@ ANALYTES: list[Analyte] = [
             ["post prandial blood sugar", "blood sugar (p.p)", "blood sugar(p.p)",
              "blood sugar (pp)", "blood sugar(pp)", "glucose post prandial",
              "bl.sugar (pp)", "bl.sugar(pp)", "bl sugar (pp)", "b.sugar(pp)",
+             "bld sugar (pp)", "bld sugar(pp)",
              "sugar (pp)", "pp glucose", "ppbs", "blood sugar pp",
              "post prandial", "postprandial", "blood sugar postprandial",
              "glucose postprandial",
@@ -426,7 +462,14 @@ ANALYTES: list[Analyte] = [
              "means glucose value", "mean glucose value", "means glucose",
              "mean glucose", "mean plasma glucose",
              "estimation of mean blood glucose", "estimated average blood glucose",
-             "estimated avg glucose", "eag", "eab", "abg"],
+             "estimated avg glucose", "eag", "eab", "abg",
+             # "Avarage" -- the lab's own misspelling of "Average", printed
+             # consistently across its reports, not an OCR misread. Same
+             # convention already used elsewhere for a lab's own typos
+             # ("cholestrol", "triglericids"). Confirmed on two real reports
+             # from the same lab.
+             "avarage bld sugar", "avarage glucose level",
+             "avarage blood sugar", "avarage blood glucose"],
             "mg/dL", None, None, "Diabetes"),
 
     # ---- Lipids ----------------------------------------------------------- #
@@ -749,12 +792,25 @@ def _first_real_range(tail: str) -> re.Match | None:
 # patient's result. Confirmed on a real report: this genuinely turned an
 # HbA1c of 8.1 into -10 before the fix.
 #
-# (?![A-Za-z]) is the same guard on the other side. Without it, "Us TSH - 3rd
-# Generation 1.58 mIu/ml" reads as containing the number 3 (from "3rd") --
-# the digits of an ordinal are a perfectly valid-looking token on their left
-# side, and only checking what came before missed that "rd" glued onto the
-# right side means it is not a standalone number at all. Confirmed on a real
-# report: this genuinely turned a TSH of 1.58 into 3.
+# (?!(?:st|nd|rd|th)\b) is the same guard on the other side, narrowly scoped
+# to ordinal suffixes. Without it, "Us TSH - 3rd Generation 1.58 mIu/ml"
+# reads as containing the number 3 (from "3rd") -- the digits of an ordinal
+# are a perfectly valid-looking token on their left side, and only checking
+# what came before missed that "rd" glued onto the right side means it is
+# not a standalone number at all. Confirmed on a real report: this genuinely
+# turned a TSH of 1.58 into 3.
+#
+# This used to be a blanket (?![A-Za-z]) -- reject *any* following letter,
+# not just an ordinal suffix. That is too broad: a value is very often
+# glued directly to its unit with no space at all ("128mg/dl", "29.8mg/dl"),
+# and greedy \d+ happily backtracks to satisfy a blanket letter-exclusion by
+# giving up trailing digits of the number itself, since nothing stops it at
+# a digit -- "128mg/dl" matched "12" (backtracking off the "8" because the
+# next character, "m", is a letter, then stopping at "12" because the next
+# character, "8", is merely a digit, not a letter). Confirmed on a real
+# report: a printed 128 came back as 12. Scoping the exclusion to actual
+# ordinal suffixes keeps the original TSH fix intact while letting a number
+# keep every one of its own digits.
 #
 # The boundary set also includes a colon (regular ":" or full-width "："),
 # unlike the plain whitespace-only version above -- "TRIGLYCERIDES(TGL)
@@ -765,8 +821,8 @@ def _first_real_range(tail: str) -> re.Match | None:
 # invisible to this regex, so the row silently failed to parse at all even
 # though the correct digits were sitting right there.
 _NUMBER = re.compile(
-    r"(?<![^\s:：])[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![A-Za-z])"
-    r"|(?<![^\s:：])[-+]?\d+(?:\.\d+)?(?![A-Za-z])")
+    r"(?<![^\s:：])[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?!(?:st|nd|rd|th)\b)"
+    r"|(?<![^\s:：])[-+]?\d+(?:\.\d+)?(?!(?:st|nd|rd|th)\b)")
 
 
 def _to_float(text: str) -> float | None:
@@ -1163,8 +1219,23 @@ def _parse_row(line: Line, sex: str | None = None,
     # Method:HPLC   6.1 - 7.0 % Good Control" -- a real layout, one
     # interpretation tier per line, aligned beside the label), which reads
     # as a second, wrong result for that analyte. Confirmed on a real report.
-    if _CONTROL_TIER_ROW.search(text):
-        return None
+    tier_hit = _CONTROL_TIER_ROW.search(text)
+    if tier_hit:
+        # Reject only when the row's own first number is itself the tier's
+        # bound rather than a distinct measured value -- told apart by what
+        # immediately follows it. In the bad case above, "6.1" is instantly
+        # followed by " - 7.0", the rest of that same bound; there is no
+        # value anywhere else on the row. But some labs print the tier
+        # inline right after a genuine result on the same row ("HbA1c 6.24%
+        # 6.0 - 7.0% Good control", continuing on the next two lines) --
+        # there "6.24" is immediately followed by its own unit ("%"), not a
+        # dash, because it is the real result and the tier is only its first
+        # reference band. Confirmed on a real report: rejecting unconditionally
+        # discarded a genuine HbA1c reading that carried a legitimate 3-tier
+        # range across this row and the two below it.
+        first_num = _NUMBER.search(text)
+        if not first_num or re.match(r"\s*-", text[first_num.end():]):
+            return None
 
     # A square-bracketed *multi-word phrase* -- "[Primary Target of
     # Therapy]" -- is a reliable signal that this line is explanatory
@@ -1626,6 +1697,17 @@ _AGE_SEX_LINE = re.compile(
 _NAME_LIKE_LINE = re.compile(
     r"^(?:mr|mrs|ms|miss|mis|m/s|dr)\.?\s*[A-Za-z][A-Za-z.\s]{2,40}$",
     re.IGNORECASE)
+# A narrower variant of the same idea for a report that crams the name and
+# the age onto one single line with no separate age/sex line at all --
+# "MRS.HEMALATHA Age:60" -- so there is no line "above" anything to look
+# at. Anchored to the very start of the line for the same reason
+# _NAME_LIKE_LINE is: a title right at position 0 is what keeps this from
+# firing on an unrelated line that merely mentions "Age:" somewhere later
+# in a sentence. Confirmed on a real report, repeated identically across
+# all 4 of its photographed pages.
+_NAME_THEN_AGE_LINE = re.compile(
+    r"^((?:mr|mrs|ms|miss|mis|m/s|dr)\.?\s*[A-Za-z][A-Za-z.\s]{2,40}?)"
+    r"\s+age\s*:", re.IGNORECASE)
 
 
 def _find_name_before_age_sex_line(ocr: OcrResult) -> str:
@@ -1641,9 +1723,15 @@ def _find_name_before_age_sex_line(ocr: OcrResult) -> str:
     """
     for read in (ocr.variants or [ocr]):
         for i, line in enumerate(read.lines):
+            text = line.text.strip()
+            same_line = _NAME_THEN_AGE_LINE.match(text)
+            if same_line:
+                cleaned = _clean_name(same_line.group(1))
+                if cleaned:
+                    return cleaned
             if i == 0:
                 continue
-            if not _AGE_SEX_LINE.match(line.text.strip()):
+            if not _AGE_SEX_LINE.match(text):
                 continue
             candidate = read.lines[i - 1].text.strip()
             if _NAME_LIKE_LINE.match(candidate):
@@ -1651,6 +1739,44 @@ def _find_name_before_age_sex_line(ocr: OcrResult) -> str:
                 if cleaned:
                     return cleaned
     return ""
+
+
+def _pick_best_reading(candidates: list[AnalyteResult]) -> AnalyteResult:
+    """
+    Choose the most trustworthy reading of one row across every OCR variant.
+
+    Different preprocessing passes sometimes read the very same printed
+    digits differently -- one pass prepends a stray extra digit, another
+    reads a multi-tier reference range's continuation lines in a different
+    order and lands on the wrong band entirely. Raw OCR confidence alone is
+    not a reliable tie-break for the latter: a scrambled read's individual
+    characters can still score confidently, since confidence measures how
+    sure the engine is about each glyph, not whether the downstream
+    reference-range logic landed on the right band.
+
+    When two or more variants independently agree on the same (value, flag)
+    pair, that agreement is stronger evidence of correctness than any single
+    read's confidence score, so it wins over a lone dissenting variant even
+    one that scored higher. Otherwise, falls back to the original rule:
+    prefer a reading not flagged "check" (see _verdict) over one that is,
+    then prefer higher confidence. Confirmed on a real report: 2 of 4
+    variants agreed a fasting glucose of 97.6 was normal (reference
+    "< 100"), a 3rd variant's scrambled tier lines instead read it as low
+    ("> 126"), and that 3rd, wrong variant's marginally higher confidence
+    was previously what won.
+    """
+    if len(candidates) == 1:
+        return candidates[0]
+
+    groups: dict[tuple[str, str], list[AnalyteResult]] = {}
+    for c in candidates:
+        groups.setdefault((c.value, c.flag), []).append(c)
+    majority = max(groups.values(), key=len)
+    pool = majority if len(majority) > 1 else candidates
+
+    non_check = [c for c in pool if c.flag != "check"]
+    pool = non_check or pool
+    return max(pool, key=lambda c: c.confidence)
 
 
 def extract_report(ocr: OcrResult, filename: str = "") -> BloodReport:
@@ -1667,7 +1793,7 @@ def extract_report(ocr: OcrResult, filename: str = "") -> BloodReport:
     # here the way it does for an id -- a mangled row simply fails to parse and
     # the correct read of it wins by being the only one that parsed at all.
     reads = ocr.variants or [ocr]
-    best_by_key: dict[tuple[str, int], AnalyteResult] = {}
+    candidates_by_slot: dict[tuple[str, int], list[AnalyteResult]] = {}
     unknown: dict[str, AnalyteResult] = {}
     claimed_context: set[str] = set()
 
@@ -1691,28 +1817,10 @@ def extract_report(ocr: OcrResult, filename: str = "") -> BloodReport:
                         f"reading {occurrence + 1} of this test on the report"
                 claimed_context.add(row.context)
                 slot = (row.key, occurrence)
-                current = best_by_key.get(slot)
-                if current is None:
-                    best_by_key[slot] = row
-                else:
-                    # Prefer a plausible reading over an implausible one
-                    # regardless of which variant's OCR reported higher
-                    # confidence -- different preprocessing passes
-                    # sometimes read the very same printed digits
-                    # differently (one pass prepends a stray extra digit,
-                    # another does not), and a value flagged "check" (see
-                    # _verdict) is exactly the signal that this particular
-                    # read is probably the wrong one. Confirmed on a real
-                    # report: one variant read a value correctly while
-                    # three others each corrupted it differently, and
-                    # without this the corrupted read's own higher OCR
-                    # confidence was what won.
-                    current_ok = current.flag != "check"
-                    row_ok = row.flag != "check"
-                    if row_ok and not current_ok:
-                        best_by_key[slot] = row
-                    elif row_ok == current_ok and row.confidence > current.confidence:
-                        best_by_key[slot] = row
+                candidates_by_slot.setdefault(slot, []).append(row)
+
+    best_by_key = {slot: _pick_best_reading(rows)
+                   for slot, rows in candidates_by_slot.items()}
 
     # Second pass for rows no analyte claimed, so an unusual test still shows up.
     for read in reads:
