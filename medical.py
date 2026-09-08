@@ -92,16 +92,16 @@ def _clean_name(value: str) -> str:
     if re.match(r"^(?:Age|Sex|Gender|Ref|Regist\w*|Reg|Lab|Date|UHID|Bill|"
                 r"Sample|Specimen|Patient|Report|of|the|No|Collected|"
                 r"Physician|Referral|Doctor|Consultant|Branch|Mobile|Email|"
-                r"Phone|Ordered|SID)\b", text, re.IGNORECASE):
+                r"Phone|Ordered|SID|VID|Visit)\b", text, re.IGNORECASE):
         return ""
     # Regist\w*, not Reg\b: "Reg" only matches a complete word, so it missed
     # "Registered Date" entirely (no boundary between "g" and the "i" that
     # follows) and let a name run on into that neighboring column. Confirmed
     # on a real report.
-    # "Ordered On" (as a compound phrase -- see below) and "SID" (a lab's
-    # own sample/serial id column, printed as a bare word right after the
-    # name) catch two more real reports where the name ran on into the next
-    # crowded column.
+    # "Ordered On" (as a compound phrase -- see below), "SID" and "VID" (a
+    # lab's own sample/visit id column, printed as a bare word right after
+    # the name), and "Visit ID" (the same idea spelled out) catch several
+    # more real reports where the name ran on into the next crowded column.
     text = re.split(r"\s+(?=(?:Age|Sex|Gender|Ref|Regist\w*|Reg|Lab|Date|"
                     r"UHID|Bill|Sample|Specimen|Patient|Report|Dt|Collected|"
                     r"Physician|Referral|Doctor|Consultant|Branch|Mobile|"
@@ -115,8 +115,12 @@ def _clean_name(value: str) -> str:
                     # after (space optional) still anchors on the same real
                     # label and gets a trailing boundary that genuinely
                     # exists, from whatever follows "On" instead. Confirmed
-                    # on a real report.
-                    r"Email|Phone|Ordered\s*On|SID)\b)", text,
+                    # on a real report. Same reasoning for "Date\s*Of\s*
+                    # Collection" -- glued into "DATEOFCOLLECTION" with no
+                    # internal spaces on a real report, so a bare "Date\b"
+                    # never finds its boundary either.
+                    r"Email|Phone|Ordered\s*On|Date\s*Of\s*Collection|"
+                    r"SID|VID|Visit\s*ID)\b)", text,
                     maxsplit=1, flags=re.IGNORECASE)[0]
     # A leading "Patient :" survives only on values the scan_patterns below
     # produced -- their own match has to include the label text, since there
@@ -157,9 +161,18 @@ META_RULES: list[FieldRule] = [
         # abbreviation "Pt") is a distinct, real variant from "pt's name"
         # above -- confirmed on two real reports from the same lab, both
         # printing "Pt.Name:".
+        # "Name Mr/Mrs:" is one lab's own combined label -- asking for the
+        # title and the name together under one heading -- not "Name:"
+        # followed by a separate "Mr/Mrs" field. Without its own longer
+        # alias, bare "name" matches first (aliases are tried longest-first,
+        # but this was still the longest match before this was added) and
+        # the value-scan starts right after "Name", landing on "Mr/Mrs"
+        # itself -- part of the label's own text, not the patient's name --
+        # and stops there since "Mr/Mrs" alone looks like a complete,
+        # well-formed value. Confirmed on two real reports from the same lab.
         aliases=["patient name", "patients name", "patient's name",
                  "name of patient", "pt's name", "pts name", "pt s name",
-                 "pt.name", "pt name", "pt. name",
+                 "pt.name", "pt name", "pt. name", "name mr/mrs",
                  "name"],
         # /  covers "W/O", "S/O", "D/O", "C/O" -- Wife/Son/Daughter/Care Of,
         # printed as part of the name itself on many Indian reports ("MRS.
@@ -224,8 +237,33 @@ META_RULES: list[FieldRule] = [
         # value produced "36YIM" with no word boundary before the "M", which
         # detect_sex's \bM\b then failed to match -- worse than leaving the
         # sex unparsed, since it looks like a proper reading but is not one.)
-        value_pattern=r"\d{1,3}(?:\.\d+)?\s*(?:y(?:rs?|ears?)?)?\s*(?:[/,]|1(?=\s*[MF]))?\s*(?:sex\s*:?\s*)?(?:M|F|Male|Female)?",
+        # (?<!\d) before the number and (?!\d) right after it require the
+        # whole thing to be a complete, standalone number -- not any 1-3
+        # digit slice out of a longer one. Both sides are needed: the
+        # trailing guard alone still let .search() start mid-number and
+        # walk to wherever a 3-digit window happened to end right before a
+        # non-digit ("11038" still matched "038", the tail three digits,
+        # once "110" was rejected -- .search() simply tried the next
+        # starting position instead of giving up on the whole string).
+        # Exists because a report with no age/sex value at all (a header
+        # column printed but left blank) let the shared "value sits on one
+        # of the next lines" fallback grab digits out of an unrelated
+        # field's own value further down the page instead ("Patient ID :
+        # 11038" read as age "110", then "038"). Confirmed on a real report,
+        # where the patient's real age (59-60, confirmed against two of her
+        # other reports) was nowhere on this specific page at all.
+        value_pattern=r"(?<!\d)\d{1,3}(?:\.\d+)?(?!\d)\s*(?:y(?:rs?|ears?)?)?\s*(?:[/,]|1(?=\s*[MF]))?\s*(?:sex\s*:?\s*)?(?:M|F|Male|Female)?",
         multi_segment_value=True,
+        # Narrowed from the shared default of 2 to 1: every real report seen
+        # prints the age/sex value on the same line as its label or the one
+        # right after it, never two lines down. The default's extra reach
+        # only ever mattered on a report where the label's own line (and the
+        # very next one) genuinely carried no value at all -- a header
+        # column printed but left blank -- where it went hunting two lines
+        # down and read digits out of a completely unrelated field instead
+        # (a date's day-of-month, after a patient ID was fixed first).
+        # Confirmed on a real report.
+        lookahead=1,
         normalise=_clean_plain,
         # Same layout as patient_name's scan_patterns above and reached for
         # the same reason: a report that gives age/sex only as "(60/F)" right

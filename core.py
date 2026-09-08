@@ -162,7 +162,18 @@ PDF_RENDER_DPI = 200        # enough for 8pt lab-report type; 300 is 2x the cost
 
 def is_pdf(data: bytes | str | Path) -> bool:
     if isinstance(data, (bytes, bytearray)):
-        return data[:5] == b"%PDF-"
+        # Searched for within the first 1024 bytes, not required at byte 0.
+        # A PDF exported by some scanner apps carries a few stray leading
+        # bytes (seen on a real upload: two newlines) before the "%PDF-"
+        # signature -- technically non-conformant, but PyMuPDF opens the
+        # file just fine once it gets the chance. An exact data[:5] ==
+        # b"%PDF-" check rejected it before that chance ever came, silently
+        # routing a real PDF into the image loader instead, where it failed
+        # outright (UnidentifiedImageError) rather than degrading gracefully.
+        # 1024 bytes is generous enough for any realistic leading garbage
+        # while staying far too short for the signature to turn up by
+        # coincidence in actual page content. Confirmed on a real upload.
+        return b"%PDF-" in data[:1024]
     try:
         return Path(data).suffix.lower() == ".pdf"
     except (TypeError, ValueError):
@@ -880,6 +891,16 @@ def read_document(
 
     reads: list[OcrResult] = []
     with _open_pdf(data) as doc:
+        # Caught here, not left to surface as whatever PyMuPDF happens to
+        # raise once page-loading is attempted -- for an encrypted PDF that
+        # was a bare "document closed or encrypted" ValueError, which reads
+        # like an internal fault rather than what it actually is: a real
+        # PDF this tool genuinely cannot open without the owner's password
+        # (not something to work around). Confirmed on a real upload.
+        if doc.needs_pass:
+            raise RuntimeError(
+                "That PDF is password-protected. Remove the password and "
+                "re-upload it.")
         for index, page in enumerate(doc):
             if index >= MAX_PDF_PAGES:
                 break
