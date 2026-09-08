@@ -148,7 +148,12 @@ def load_image(data: bytes | str | Path | Image.Image) -> Image.Image:
     else:
         img = Image.open(data)
     img = ImageOps.exif_transpose(img)      # honour phone-camera rotation
-    return img.convert("RGB")
+    img = img.convert("RGB")
+    if _MAX_INPUT_SIDE_LEN and max(img.size) > _MAX_INPUT_SIDE_LEN:
+        scale = _MAX_INPUT_SIDE_LEN / max(img.size)
+        img = img.resize((max(1, round(img.width * scale)),
+                           max(1, round(img.height * scale))), Image.LANCZOS)
+    return img
 
 
 MAX_PDF_PAGES = 15
@@ -394,6 +399,21 @@ if _MAX_TIER and _MAX_TIER not in TIER_ORDER:
 # unaffected by leaving this unset.
 _DET_LIMIT_SIDE_LEN = os.environ.get("DET_LIMIT_SIDE_LEN", "").strip()
 _DET_LIMIT_SIDE_LEN = int(_DET_LIMIT_SIDE_LEN) if _DET_LIMIT_SIDE_LEN.isdigit() else None
+
+# Unset (None) everywhere except a deployment that opts in via MAX_INPUT_SIDE_LEN.
+# DET_LIMIT_SIDE_LEN above only caps what RapidOCR's detector scales an image
+# UP to internally -- it does nothing about a source image that starts out
+# larger than that, which stays at full size through every PIL step before it
+# (deskew, preprocess, and however many upscaled variants build_variants adds
+# on top). A modern phone photo (2920x3964, ~11.6MP here) still crashed the
+# Lambda deployment on Runtime.OutOfMemory at the full 2048MB it is given even
+# with DET_LIMIT_SIDE_LEN set -- confirmed directly, not assumed: the crash
+# persisted, unchanged, after that setting was already live. Downscaling the
+# source image itself, before any of those steps run, is what actually caps
+# the memory every later copy of it can cost. Local runs, the desktop build,
+# and anyone with memory to spare are unaffected by leaving this unset.
+_MAX_INPUT_SIDE_LEN = os.environ.get("MAX_INPUT_SIDE_LEN", "").strip()
+_MAX_INPUT_SIDE_LEN = int(_MAX_INPUT_SIDE_LEN) if _MAX_INPUT_SIDE_LEN.isdigit() else None
 
 
 def _capped_tier(tier: str) -> str:
