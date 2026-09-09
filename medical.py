@@ -1609,6 +1609,34 @@ def parse_reference(ref_text: str) -> tuple[float | None, float | None, bool]:
 _IMPLAUSIBLE_MULTIPLE = 4.0
 
 
+def _digit_reversal(numeric: float, low: float | None,
+                    high: float | None) -> float | None:
+    """
+    A whole-number result outside its range, whose digits reversed would sit
+    inside it, is more likely a transposed-digit misread than the 4x-multiple
+    check above catches -- that check is calibrated for a dropped decimal
+    point or a doubled digit (an 8-10x swing), but swapping two adjacent
+    digits produces a much smaller error (82 -> 28 is under 3x). Scoped to
+    whole numbers only: reversing a decimal's digit string is ambiguous
+    about where the point ends up, and no real report measured this session
+    supplied evidence either way for that case. Confirmed on a real report:
+    a printed fasting glucose of 82 mg/dL (reference 70-110) came back from
+    OCR as 28 -- correctly outside the range, so not silently wrong, but
+    shown as a plain LOW result indistinguishable from a genuine one.
+    """
+    if numeric != int(numeric) or numeric < 0:
+        return None
+    digits = str(int(numeric))
+    if len(digits) < 2:
+        return None
+    reversed_value = float(digits[::-1])
+    if reversed_value == numeric:
+        return None
+    in_range = ((low is None or reversed_value >= low)
+                and (high is None or reversed_value <= high))
+    return reversed_value if in_range else None
+
+
 def _verdict(numeric: float | None, low: float | None,
             high: float | None) -> tuple[str, str]:
     """
@@ -1639,8 +1667,22 @@ def _verdict(numeric: float | None, low: float | None,
             f"original report before using this value.")
 
     if high is not None and numeric > high:
+        reversed_value = _digit_reversal(numeric, low, high)
+        if reversed_value is not None:
+            return "check", (
+                f"{numeric:g} is outside the range, but its digits reversed "
+                f"({reversed_value:g}) fall within it -- more likely a "
+                f"transposed digit than a real result. Verify against the "
+                f"original report before using this value.")
         return "high", ""
     if low is not None and numeric < low:
+        reversed_value = _digit_reversal(numeric, low, high)
+        if reversed_value is not None:
+            return "check", (
+                f"{numeric:g} is outside the range, but its digits reversed "
+                f"({reversed_value:g}) fall within it -- more likely a "
+                f"transposed digit than a real result. Verify against the "
+                f"original report before using this value.")
         return "low", ""
     return "normal", ""
 
