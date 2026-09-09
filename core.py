@@ -778,6 +778,85 @@ def _ocr_pass(original, runner, chosen, preprocess_mode, tier,
     return reads, failure
 
 
+# A text line's bounding box is wider than it is tall for any horizontal
+# script read at its own correct orientation, regardless of language or
+# content -- a page rotated a multiple of 90 degrees turns every one of
+# those normally-wide boxes tall-and-narrow in the rotated pixel frame
+# instead. Confirmed on a real report: 94 of the 100 boxes detected came
+# back taller than wide, at a perfectly ordinary mean confidence (0.80) that
+# gave no other hint anything was wrong -- individual words were still read
+# correctly, just assembled into lines in the wrong order, since the
+# wide-box geometry _group_lines's own left-to-right ordering assumes never
+# held for this page. Two ordinary, correctly-oriented reports measured the
+# same way -- a payment receipt and a lab report -- came back 100% wide, 0%
+# tall. The two populations do not overlap here, which is what makes a
+# plain majority vote a safe, cheap, single check: confidence and word
+# count, the two signals already used for tier escalation, do not catch
+# this failure mode at all.
+def _box_shapes(read: "OcrResult") -> list[Segment]:
+    return [s for line in read.lines for s in line.segments]
+
+
+def _looks_upright(read: "OcrResult") -> bool:
+    segments = _box_shapes(read)
+    if not segments:
+        return True     # nothing to judge -- do not go looking for trouble
+    wide = sum(1 for s in segments if (s.right - s.x) > s.height)
+    return wide >= len(segments) / 2
+
+
+def _orientation_score(read: "OcrResult") -> tuple[float, int, float]:
+    """Higher is more likely upright. Compared as a tuple: the wide-box
+    fraction decides first, word count and confidence only break a tie."""
+    segments = _box_shapes(read)
+    if not segments:
+        return (0.0, 0, 0.0)
+    wide_frac = sum(1 for s in segments if (s.right - s.x) > s.height) / len(segments)
+    return (wide_frac, read.word_count, read.mean_conf)
+
+
+def _correct_orientation(original: Image.Image, reads: list["OcrResult"],
+                         runner, chosen: str, preprocess_mode: str, tier: str
+                         ) -> tuple[Image.Image, list["OcrResult"]]:
+    """
+    Try the other three multiples-of-90-degree rotations and keep whichever
+    one actually reads upright, if any beats the original.
+
+    Only reached when _looks_upright already said no on the tier's own
+    real read, so a normal, correctly-oriented image never pays for this at
+    all -- the common case is exactly as fast as it was before this existed.
+    Each rotation is tried with one cheap single read (not the full tier's
+    whole variant set) purely to decide which orientation is right; once one
+    is chosen, the real tier read happens again on that corrected image so
+    the result that is actually returned gets the same variants and
+    escalation headroom a normally-oriented image would have gotten from
+    the start.
+    """
+    best_read = max(reads, key=lambda r: (r.word_count, r.mean_conf))
+    best_image = original
+    best_score = _orientation_score(best_read)
+
+    for rotation in (Image.ROTATE_90, Image.ROTATE_180, Image.ROTATE_270):
+        candidate_image = original.transpose(rotation)
+        try:
+            segments, _ = runner(preprocess(candidate_image, preprocess_mode))
+        except Exception:
+            continue
+        score = _orientation_score(OcrResult(_group_lines(segments)))
+        if score > best_score:
+            best_image, best_score = candidate_image, score
+
+    if best_image is original:
+        return original, reads
+
+    new_reads, _ = _ocr_pass(best_image, runner, chosen, preprocess_mode, tier)
+    if not new_reads:
+        # The corrected orientation somehow failed outright -- the original
+        # read, however sideways, is still better than nothing.
+        return original, reads
+    return best_image, new_reads
+
+
 def read_image(
     data: bytes | str | Path | Image.Image,
     engine: str = "auto",
@@ -839,6 +918,10 @@ def read_image(
     ceiling = _MAX_TIER or "high"
     reads, failure = _ocr_pass(original, runner, chosen, preprocess_mode, tier)
     escalated = False
+
+    if reads and not _looks_upright(max(reads, key=lambda r: (r.word_count, r.mean_conf))):
+        original, reads = _correct_orientation(original, reads, runner, chosen,
+                                               preprocess_mode, tier)
 
     while accuracy == "auto" and tier != ceiling:
         best_so_far = (max(reads, key=lambda r: (r.word_count, r.mean_conf))
