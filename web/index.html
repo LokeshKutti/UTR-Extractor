@@ -777,6 +777,15 @@ function imageCard(r, idx) {
   card.appendChild(head);
 
   const body = el("div", "card-body");
+
+  const ocrDetails = el("details");
+  ocrDetails.open = true;
+  ocrDetails.appendChild(el("summary", null, "Full OCR text"));
+  const ocrInner = el("div", "inner");
+  ocrInner.appendChild(el("pre", "ocr", r.full_text_display || r.full_text || "(no text recovered)"));
+  ocrDetails.appendChild(ocrInner);
+  body.appendChild(ocrDetails);
+
   const split = el("div", "split");
 
   /* left: the screenshot */
@@ -815,16 +824,7 @@ function imageCard(r, idx) {
   split.appendChild(rightCol);
   body.appendChild(split);
 
-  /* full OCR text */
   body.appendChild(aiPanel(r));
-
-  const det = el("details");
-  det.appendChild(el("summary", null, "Full OCR text"));
-  const inner = el("div", "inner");
-  const pre = el("pre", "ocr", r.full_text_display || r.full_text || "(no text recovered)");
-  inner.appendChild(pre);
-  det.appendChild(inner);
-  body.appendChild(det);
 
   card.appendChild(body);
   return card;
@@ -940,6 +940,14 @@ function labCard(r) {
     body.appendChild(grid);
   }
 
+  const ocrDetails = el("details");
+  ocrDetails.open = true;
+  ocrDetails.appendChild(el("summary", null, "Full OCR text"));
+  const ocrInner = el("div", "inner");
+  ocrInner.appendChild(el("pre", "ocr", r.full_text_display || r.full_text || "(no text recovered)"));
+  ocrDetails.appendChild(ocrInner);
+  body.appendChild(ocrDetails);
+
   if (!r.tests.length) {
     body.appendChild(el("div", "empty",
       "No test rows were recognised. Try Maximum accuracy, or check the full OCR text."));
@@ -977,13 +985,6 @@ function labCard(r) {
   }
 
   body.appendChild(aiPanel(r));
-
-  const det = el("details");
-  det.appendChild(el("summary", null, "Full OCR text"));
-  const inner = el("div", "inner");
-  inner.appendChild(el("pre", "ocr", r.full_text_display || r.full_text || "(no text recovered)"));
-  det.appendChild(inner);
-  body.appendChild(det);
 
   card.appendChild(body);
   return card;
