@@ -857,6 +857,66 @@ def _correct_orientation(original: Image.Image, reads: list["OcrResult"],
     return best_image, new_reads
 
 
+# How much extra margin to keep around the detected text when auto-cropping,
+# as a fraction of the image's own width/height -- generous on purpose.
+# Detection can miss a faint character right at a row's edge, or a logo/
+# letterhead graphic with no OCR-recognisable text of its own; a tight crop
+# risks cutting either off, and the point of this feature is a safer read,
+# not a smaller file.
+_CROP_MARGIN_FRAC = 0.06
+# Skip the crop when it would not meaningfully help (barely smaller than the
+# original -- not worth another OCR pass for a sliver of background) or when
+# the detected text is too sparse relative to the image to trust the
+# boundary it implies (most likely a badly under-read image, where cropping
+# to what little was found risks discarding a real, undetected row instead
+# of a desk or a phone's own UI chrome).
+_CROP_MIN_SHRINK = 0.15
+_CROP_MIN_RETAIN = 0.40
+
+
+def _text_bounds(read: "OcrResult") -> tuple[float, float, float, float] | None:
+    segments = _box_shapes(read)
+    if not segments:
+        return None
+    lefts = [s.x for s in segments]
+    rights = [s.right for s in segments]
+    tops = [s.y - s.height / 2 for s in segments]
+    bottoms = [s.y + s.height / 2 for s in segments]
+    return min(lefts), min(tops), max(rights), max(bottoms)
+
+
+def _auto_crop(original: Image.Image, read: "OcrResult") -> Image.Image | None:
+    """
+    Crop to the detected text's own bounding box, plus generous margin, so
+    a photo's background -- a desk, a granite countertop, a phone's own UI
+    chrome around a screenshot -- stops competing with the report itself
+    for the same fixed pixel budget a later resize/upscale step has to
+    divide between them. Returns None, meaning "leave the original alone",
+    whenever the crop would not help enough to be worth another OCR pass,
+    or when too little text was found to trust the boundary it implies.
+    """
+    bounds = _text_bounds(read)
+    if bounds is None:
+        return None
+    left, top, right, bottom = bounds
+    width, height = original.size
+
+    left = max(0, left - width * _CROP_MARGIN_FRAC)
+    top = max(0, top - height * _CROP_MARGIN_FRAC)
+    right = min(width, right + width * _CROP_MARGIN_FRAC)
+    bottom = min(height, bottom + height * _CROP_MARGIN_FRAC)
+
+    crop_w, crop_h = right - left, bottom - top
+    if crop_w <= 0 or crop_h <= 0:
+        return None
+    if crop_w < width * _CROP_MIN_RETAIN or crop_h < height * _CROP_MIN_RETAIN:
+        return None
+    if crop_w * crop_h > width * height * (1 - _CROP_MIN_SHRINK):
+        return None
+
+    return original.crop((int(left), int(top), int(right), int(bottom)))
+
+
 def read_image(
     data: bytes | str | Path | Image.Image,
     engine: str = "auto",
@@ -922,6 +982,21 @@ def read_image(
     if reads and not _looks_upright(max(reads, key=lambda r: (r.word_count, r.mean_conf))):
         original, reads = _correct_orientation(original, reads, runner, chosen,
                                                preprocess_mode, tier)
+
+    if reads:
+        best_before = max(reads, key=lambda r: (r.word_count, r.mean_conf))
+        cropped = _auto_crop(original, best_before)
+        if cropped is not None:
+            crop_reads, _ = _ocr_pass(cropped, runner, chosen, preprocess_mode, tier)
+            if crop_reads:
+                best_after = max(crop_reads, key=lambda r: (r.word_count, r.mean_conf))
+                # Keep the crop only when it reads at least as well as the
+                # uncropped image did -- a crop that recovers fewer words is
+                # a sign the boundary it was based on cut something real
+                # off, and the uncropped read is the safer of the two.
+                if ((best_after.word_count, best_after.mean_conf)
+                        >= (best_before.word_count, best_before.mean_conf)):
+                    original, reads = cropped, crop_reads
 
     while accuracy == "auto" and tier != ceiling:
         best_so_far = (max(reads, key=lambda r: (r.word_count, r.mean_conf))
