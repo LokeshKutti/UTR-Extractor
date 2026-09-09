@@ -209,6 +209,11 @@ pre.ocr {
   padding: 12px; font-family: var(--mono); font-size: 11.5px; line-height: 1.6;
   white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 340px; overflow: auto;
 }
+pre.ocr + .ocr-label { margin-top: 10px; }
+.ocr-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--ink-3); font-weight: 700; margin-bottom: 4px;
+}
 .toast {
   position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(80px);
   background: var(--ink); color: var(--bg); padding: 9px 18px; border-radius: 20px;
@@ -445,6 +450,42 @@ const el = (tag, cls, text) => {
   if (text !== undefined) n.textContent = text;
   return n;
 };
+
+// Splits the raw OCR text into a header block (patient/hospital/date info)
+// and a results block (the actual test rows), purely for display -- this
+// never touches what gets extracted, only how the raw text preview is laid
+// out. Every real report's own column-header row ("Test Result Reference
+// Value", "TEST PARAMETER RESULT REFERENCE RANGE", "Investigation Observed
+// Value ... Reference Interval") pairs a name for the test column with a
+// name for one of its neighbours, so the first line matching that shape is
+// almost always the true boundary between the two. Returns null rather than
+// guessing when no such line is found, so the caller can fall back to one
+// undivided block instead of splitting somewhere arbitrary.
+const OCR_RESULTS_HEADER_RE = /\b(test|investigation)\b.*\b(results?|value|parameter|description)\b/i;
+function splitOcrText(text) {
+  const lines = text.split("\n");
+  for (let i = 1; i < lines.length; i++) {
+    if (OCR_RESULTS_HEADER_RE.test(lines[i])) {
+      return { header: lines.slice(0, i).join("\n"),
+                results: lines.slice(i).join("\n") };
+    }
+  }
+  return null;
+}
+
+function ocrTextBlocks(text) {
+  const frag = document.createDocumentFragment();
+  const split = text ? splitOcrText(text) : null;
+  if (!split) {
+    frag.appendChild(el("pre", "ocr", text || "(no text recovered)"));
+    return frag;
+  }
+  frag.appendChild(el("div", "ocr-label", "Header"));
+  frag.appendChild(el("pre", "ocr", split.header));
+  frag.appendChild(el("div", "ocr-label", "Test results"));
+  frag.appendChild(el("pre", "ocr", split.results));
+  return frag;
+}
 
 function toast(msg) {
   const t = $("#toast");
@@ -782,7 +823,7 @@ function imageCard(r, idx) {
   ocrDetails.open = true;
   ocrDetails.appendChild(el("summary", null, "Full OCR text"));
   const ocrInner = el("div", "inner");
-  ocrInner.appendChild(el("pre", "ocr", r.full_text_display || r.full_text || "(no text recovered)"));
+  ocrInner.appendChild(ocrTextBlocks(r.full_text_display || r.full_text));
   ocrDetails.appendChild(ocrInner);
   body.appendChild(ocrDetails);
 
@@ -944,7 +985,7 @@ function labCard(r) {
   ocrDetails.open = true;
   ocrDetails.appendChild(el("summary", null, "Full OCR text"));
   const ocrInner = el("div", "inner");
-  ocrInner.appendChild(el("pre", "ocr", r.full_text_display || r.full_text || "(no text recovered)"));
+  ocrInner.appendChild(ocrTextBlocks(r.full_text_display || r.full_text));
   ocrDetails.appendChild(ocrInner);
   body.appendChild(ocrDetails);
 
